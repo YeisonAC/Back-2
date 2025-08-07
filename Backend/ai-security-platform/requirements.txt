@@ -1,0 +1,22 @@
+# Framework principal
+Flask==2.3.3
+
+# Base de datos y migraciones
+Flask-SQLAlchemy==3.1.1
+SQLAlchemy==2.0.23
+Flask-Migrate==4.0.5
+psycopg2-binary==2.9.9  # Driver para PostgreSQL (lo que usa Supabase)
+
+# Autenticación y autorización
+Flask-JWT-Extended==4.5.2
+
+# Serialización y validación de datos
+Marshmallow==3.20.1
+marshmallow-sqlalchemy==0.29.0
+Flask-Marshmallow==0.15.0
+
+# Manejo de variables de entorno
+python-dotenv==1.0.0
+
+# Servidor de producción (lo usaremos más adelante)
+gunicorn==21.2.0 
