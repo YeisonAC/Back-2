@@ -2,11 +2,12 @@ import os
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Set
 import requests
 from dotenv import load_dotenv
 import json
 from dataclasses import dataclass
+import ipaddress
 
 # Integración del Firewall (import compatible según modo de ejecución)
 try:
@@ -141,6 +142,131 @@ def _cap_messages_to_context(messages: list[dict], max_context_tokens: int) -> l
     return kept
 
 
+# ---------- Utilidades de IP del cliente ----------
+CANDIDATE_IP_HEADERS = [
+    "x-forwarded-for",
+    "x-real-ip",
+    "cf-connecting-ip",
+    "true-client-ip",
+    "x-client-ip",
+]
+
+def _is_public_ip(ip_str: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        return not (
+            ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local or ip.is_multicast
+        )
+    except Exception:
+        return False
+
+
+def _parse_xff_chain(xff: str) -> list[str]:
+    parts = [p.strip() for p in xff.split(",") if p.strip()]
+    # Algunas cadenas pueden venir con puertos; quitar :port
+    cleaned: list[str] = []
+    for p in parts:
+        if ":" in p and p.count(":") == 1 and "." in p:
+            # IPv4:port
+            cleaned.append(p.split(":")[0])
+        else:
+            cleaned.append(p)
+    return cleaned
+
+
+def _extract_client_ip_from_headers(headers) -> str | None:
+    # Case-insensitive
+    for name in CANDIDATE_IP_HEADERS:
+        val = headers.get(name) or headers.get(name.title()) or headers.get(name.upper())
+        if not val:
+            continue
+        if name == "x-forwarded-for":
+            chain = _parse_xff_chain(val)
+            # Preferir la primera pública
+            for ip in chain:
+                if _is_public_ip(ip):
+                    return ip
+            # Si no hay pública, tomar la primera
+            if chain:
+                return chain[0]
+        else:
+            ip = val.strip()
+            if ip and _is_public_ip(ip):
+                return ip
+            if ip:
+                return ip
+    return None
+
+
+def get_client_ip(request: Request) -> str:
+    ip = _extract_client_ip_from_headers(request.headers)
+    if ip:
+        return ip
+    try:
+        return request.client.host if request.client and request.client.host else "unknown"
+    except Exception:
+        return "unknown"
+
+# ---------- Fin utilidades de IP ----------
+
+# ---------- Etiquetado de seguridad ----------
+SEVERITY_ORDER = [
+    "jailbreak",
+    "prompt_injection",
+    "malicious_intent",
+    "dlp",
+    "model_probing",
+    "abuse_rate_limit",
+]
+
+FLAG_TO_LABEL = {
+    # Entrada
+    "OverridePhrase": "prompt_injection",
+    "SystemPromptLeak": "prompt_injection",
+    "ObfuscationPattern": "prompt_injection",
+    "MaliciousRolePlay": "jailbreak",
+    "InputDLP": "dlp",
+    "IntentConflict": "malicious_intent",
+    "SimilarityProbing": "model_probing",
+    "RateLimitExceeded": "abuse_rate_limit",
+    # Salida
+    "JailbreakConfirmation": "jailbreak",
+    "DLP_CreditCard": "dlp",
+    "DLP_APIKey": "dlp",
+}
+
+
+def derive_labels_from_flags(flags: List[str]) -> Set[str]:
+    labels: Set[str] = set()
+    for f in flags or []:
+        label = FLAG_TO_LABEL.get(f)
+        if label:
+            labels.add(label)
+    return labels
+
+
+def derive_labels_from_intent(intent: Optional[dict]) -> Set[str]:
+    labels: Set[str] = set()
+    if not intent:
+        return labels
+    label_text = str(intent.get("intent_label", "")).lower()
+    if "jailbreak" in label_text:
+        labels.add("jailbreak")
+    if "prompt" in label_text and ("inject" in label_text or "injection" in label_text):
+        labels.add("prompt_injection")
+    if intent.get("is_malicious") is True:
+        labels.add("malicious_intent")
+    return labels
+
+
+def pick_primary_label(labels: Set[str]) -> Optional[str]:
+    for key in SEVERITY_ORDER:
+        if key in labels:
+            return key
+    return next(iter(labels)) if labels else None
+
+# ---------- Fin etiquetado de seguridad ----------
+
 # Instancia global del firewall
 firewall = AIFirewall()
 
@@ -163,19 +289,10 @@ app = FastAPI()
 # Middleware para capturar IP del cliente y anexarla a la respuesta
 @app.middleware("http")
 async def add_client_ip(request: Request, call_next):
-    xff = request.headers.get("X-Forwarded-For")
-    xri = request.headers.get("X-Real-IP")
-    if xff:
-        client_ip = xff.split(",")[0].strip()
-    elif xri:
-        client_ip = xri.strip()
-    else:
-        client_ip = request.client.host if request.client else "unknown"
-
+    client_ip = get_client_ip(request)
     request.state.client_ip = client_ip
 
     response = await call_next(request)
-    # Exponer IP detectada en respuesta para trazabilidad
     try:
         response.headers["X-Client-IP"] = client_ip
     except Exception:
@@ -265,26 +382,22 @@ async def proxy_chat_completions(request: Request):
     # Selección de nivel
     tier = _select_tier(request)
 
-    # Obtener IP del cliente desde el middleware o calcular de forma defensiva
+    # Obtener IP del cliente con utilidades robustas
     try:
         client_ip = getattr(request.state, "client_ip")
     except Exception:
         client_ip = None
     if not client_ip:
-        xff = request.headers.get("X-Forwarded-For")
-        xri = request.headers.get("X-Real-IP")
-        if xff:
-            client_ip = xff.split(",")[0].strip()
-        elif xri:
-            client_ip = xri.strip()
-        else:
-            client_ip = request.client.host if request.client else "unknown"
+        client_ip = get_client_ip(request)
 
     print(f"INFO: Incoming prompt for model {chat_request.model} ip={client_ip} tier={tier.name}")
 
     # Metadatos opcionales de seguridad
     user_id = request.headers.get("X-User-Id", "anonymous")
     system_purpose = request.headers.get("X-System-Purpose", "general")
+
+    # Detección y acumulación de etiquetas
+    security_labels: Set[str] = set()
 
     # Primera capa: clasificación de intención por LLM + firewall tradicional
     detected_intents: list[dict] = []
@@ -294,22 +407,30 @@ async def proxy_chat_completions(request: Request):
         intent = classify_intent(request, msg.content, client_ip, tier)
         if intent:
             detected_intents.append(intent)
+            security_labels |= derive_labels_from_intent(intent)
             print(f"INFO: Intent classifier -> {intent} ip={client_ip} tier={tier.name}")
             if intent.get("is_malicious") is True:
+                primary = pick_primary_label(security_labels)
                 return JSONResponse(status_code=403, content={
                     "error": "Blocked by intent classifier",
                     "intent": intent,
                     "tier": tier.name,
+                    "security_labels": sorted(list(security_labels)),
+                    "primary_security_label": primary,
                 })
-        # Firewall heurístico (parámetros globales por ahora)
         insp = firewall.inspect_request(user_id=user_id, prompt=msg.content, system_purpose=system_purpose)
+        if insp.flags:
+            security_labels |= derive_labels_from_flags(insp.flags)
         if insp.decision == "BLOCK":
             print(f"ALERTA: Firewall bloqueó la solicitud. ip={client_ip} score={insp.threat_score} flags={insp.flags}")
+            primary = pick_primary_label(security_labels)
             return JSONResponse(status_code=403, content={
                 "error": "Security policy violation detected by firewall",
                 "threat_score": insp.threat_score,
                 "flags": insp.flags,
                 "tier": tier.name,
+                "security_labels": sorted(list(security_labels)),
+                "primary_security_label": primary,
             })
 
     # Preparar la petición para Groq
@@ -337,7 +458,6 @@ async def proxy_chat_completions(request: Request):
     try:
         # Copiar mensajes de forma segura
         orig_messages = forward_body.get("messages", [])
-        # Aplicar límite de contexto aproximado por nivel
         capped_messages = _cap_messages_to_context(orig_messages, tier.max_context_tokens)
         if detected_intents:
             last_intent = detected_intents[-1]
@@ -371,6 +491,7 @@ async def proxy_chat_completions(request: Request):
                     if "message" in data["choices"][0]:
                         data["choices"][0]["message"]["content"] = resp_insp.redacted_text
                 data["firewall"] = {"flags": resp_insp.flags, "redacted": resp_insp.redacted_text != content_text}
+                security_labels |= derive_labels_from_flags(resp_insp.flags)
             else:
                 data.setdefault("firewall", {"flags": [], "redacted": False})
 
@@ -380,16 +501,27 @@ async def proxy_chat_completions(request: Request):
                     "enabled": True,
                     "last_intent": detected_intents[-1],
                 }
+                security_labels |= derive_labels_from_intent(detected_intents[-1])
             else:
                 data.setdefault("intent_layer", {"enabled": tier.enable_intent_layer, "last_intent": None})
 
             data["tier"] = tier.name
+            # Añadir etiquetas de seguridad
+            primary = pick_primary_label(security_labels)
+            data["security_labels"] = sorted(list(security_labels))
+            data["primary_security_label"] = primary
 
             return JSONResponse(content=data, status_code=response.status_code)
         else:
             print(f"ERROR: Error de Groq API: {response.status_code} - {response.text} ip={client_ip}")
+            primary = pick_primary_label(security_labels)
             return JSONResponse(
-                content={"error": f"Groq API error: {response.text}", "tier": tier.name}, 
+                content={
+                    "error": f"Groq API error: {response.text}",
+                    "tier": tier.name,
+                    "security_labels": sorted(list(security_labels)),
+                    "primary_security_label": primary,
+                }, 
                 status_code=response.status_code
             )
             
