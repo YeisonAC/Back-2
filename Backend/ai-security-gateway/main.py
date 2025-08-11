@@ -2,10 +2,11 @@ import os
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional, Tuple
 import requests
 from dotenv import load_dotenv
 import json
+from dataclasses import dataclass
 
 # Integración del Firewall (import compatible según modo de ejecución)
 try:
@@ -21,6 +22,124 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 CLASSIFIER_MODEL = os.getenv("GROQ_CLASSIFIER_MODEL", "openai/gpt-oss-20b")
 COMPLETION_MODEL = os.getenv("GROQ_COMPLETION_MODEL", "openai/gpt-oss-20b")
 ENABLE_INTENT_LAYER = os.getenv("ENABLE_INTENT_LAYER", "true").lower() in {"1", "true", "yes"}
+
+@dataclass
+class TierConfig:
+    name: str
+    # Límite aproximado de tokens de contexto (estimación por caracteres)
+    max_context_tokens: int
+    # Límite de tokens de salida por respuesta
+    max_output_tokens: int
+    # Modelo de completado a usar
+    completion_model: str
+    # Parámetros de completado
+    completion_temperature: float
+    completion_top_p: float
+    # Clasificador
+    classifier_model: str
+    classifier_temperature: float
+    classifier_max_tokens: int
+    classifier_retries: int
+    # Controles de rendimiento
+    enable_intent_layer: bool
+
+
+def _env_or(default_value: str, env_name: str) -> str:
+    v = os.getenv(env_name)
+    return v if v else default_value
+
+
+# Definición de niveles
+TIER_CONFIGS: dict[str, TierConfig] = {
+    "L1-mini": TierConfig(
+        name="L1-mini",
+        max_context_tokens=4000,
+        max_output_tokens=512,
+        completion_model=_env_or(COMPLETION_MODEL, "L1_MINI_COMPLETION_MODEL"),
+        completion_temperature=0.7,
+        completion_top_p=1.0,
+        classifier_model=_env_or(CLASSIFIER_MODEL, "L1_MINI_CLASSIFIER_MODEL"),
+        classifier_temperature=0.0,
+        classifier_max_tokens=256,
+        classifier_retries=0,
+        enable_intent_layer=ENABLE_INTENT_LAYER,
+    ),
+    "L1-medium": TierConfig(
+        name="L1-medium",
+        max_context_tokens=16000,
+        max_output_tokens=1024,
+        completion_model=_env_or(COMPLETION_MODEL, "L1_MEDIUM_COMPLETION_MODEL"),
+        completion_temperature=0.6,
+        completion_top_p=0.95,
+        classifier_model=_env_or(CLASSIFIER_MODEL, "L1_MEDIUM_CLASSIFIER_MODEL"),
+        classifier_temperature=0.0,
+        classifier_max_tokens=384,
+        classifier_retries=1,
+        enable_intent_layer=True,
+    ),
+    "L1-pro": TierConfig(
+        name="L1-pro",
+        max_context_tokens=64000,
+        max_output_tokens=2048,
+        completion_model=_env_or(COMPLETION_MODEL, "L1_PRO_COMPLETION_MODEL"),
+        completion_temperature=0.4,
+        completion_top_p=0.9,
+        classifier_model=_env_or(CLASSIFIER_MODEL, "L1_PRO_CLASSIFIER_MODEL"),
+        classifier_temperature=0.0,
+        classifier_max_tokens=512,
+        classifier_retries=2,
+        enable_intent_layer=True,
+    ),
+}
+
+
+def _normalize_tier_name(raw: Optional[str]) -> str:
+    if not raw:
+        return "L1-mini"
+    v = raw.strip().lower()
+    if v in {"mini", "l1", "l1-mini", "l1_mini"}:
+        return "L1-mini"
+    if v in {"medium", "mid", "l1-medium", "l1_medium"}:
+        return "L1-medium"
+    if v in {"pro", "l1-pro", "l1_pro"}:
+        return "L1-pro"
+    return "L1-mini"
+
+
+def _select_tier(request: Request) -> TierConfig:
+    # Prioridad: Header > query param > default
+    raw = request.headers.get("X-Layer") or request.query_params.get("layer")
+    name = _normalize_tier_name(raw)
+    return TIER_CONFIGS.get(name, TIER_CONFIGS["L1-mini"])
+
+
+def _estimate_tokens(text: str) -> int:
+    # Aproximación 1 token ~ 4 chars
+    return max(1, len(text) // 4)
+
+
+def _cap_messages_to_context(messages: list[dict], max_context_tokens: int) -> list[dict]:
+    # Conserva desde el final (más recientes) y trunca si excede
+    kept: list[dict] = []
+    total = 0
+    for msg in reversed(messages):
+        content = str(msg.get("content", ""))
+        t = _estimate_tokens(content)
+        if total + t <= max_context_tokens:
+            kept.append(msg)
+            total += t
+        else:
+            # Intentar truncar este mensaje si nada se ha agregado aún
+            if t > 0 and not kept and max_context_tokens > 0:
+                # Mantener solo la cola del contenido que quepa
+                approx_chars = max_context_tokens * 4
+                msg_copy = dict(msg)
+                msg_copy["content"] = content[-approx_chars:]
+                kept.append(msg_copy)
+            break
+    kept.reverse()
+    return kept
+
 
 # Instancia global del firewall
 firewall = AIFirewall()
@@ -96,38 +215,42 @@ INTENT_SYSTEM_PROMPT = (
 )
 
 
-def classify_intent(request: Request, prompt_text: str, client_ip: str) -> dict | None:
-    if not ENABLE_INTENT_LAYER:
+def classify_intent(request: Request, prompt_text: str, client_ip: str, tier: TierConfig) -> dict | None:
+    if not tier.enable_intent_layer:
         return None
     messages = [
         {"role": "system", "content": INTENT_SYSTEM_PROMPT},
         {"role": "user", "content": prompt_text},
     ]
     payload = {
-        "model": CLASSIFIER_MODEL,
+        "model": tier.classifier_model,
         "messages": messages,
-        "temperature": 0.0,
+        "temperature": tier.classifier_temperature,
         "top_p": 1.0,
-        "max_tokens": 256,
+        "max_tokens": tier.classifier_max_tokens,
         "stream": False,
     }
     headers = _build_forwarded_ip_headers(request, client_ip)
-    try:
-        resp = requests.post(GROQ_CHAT_URL, headers=headers, json=payload, timeout=30)
-        if resp.status_code != 200:
-            print(f"ERROR: Intent classifier error: {resp.status_code} - {resp.text} ip={client_ip}")
-            return None
-        data = resp.json()
-        text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-        # Asegurar parseo JSON robusto
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            text = text[start : end + 1]
-        return json.loads(text)
-    except Exception as e:
-        print(f"ERROR: Exception in intent classification: {e} ip={client_ip}")
-        return None
+    attempt = 0
+    while attempt <= tier.classifier_retries:
+        try:
+            resp = requests.post(GROQ_CHAT_URL, headers=headers, json=payload, timeout=30)
+            if resp.status_code != 200:
+                print(f"ERROR: Intent classifier error: {resp.status_code} - {resp.text} ip={client_ip}")
+                attempt += 1
+                continue
+            data = resp.json()
+            text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                text = text[start : end + 1]
+            return json.loads(text)
+        except Exception as e:
+            print(f"ERROR: Exception in intent classification: {e} ip={client_ip}")
+            attempt += 1
+    return None
+
 
 # Endpoint Proxy
 @app.post("/v1/chat/completions")
@@ -139,6 +262,9 @@ async def proxy_chat_completions(request: Request):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error de validación: {str(e)}")
     
+    # Selección de nivel
+    tier = _select_tier(request)
+
     # Obtener IP del cliente desde el middleware o calcular de forma defensiva
     try:
         client_ip = getattr(request.state, "client_ip")
@@ -154,7 +280,7 @@ async def proxy_chat_completions(request: Request):
         else:
             client_ip = request.client.host if request.client else "unknown"
 
-    print(f"INFO: Incoming prompt for model {chat_request.model} ip={client_ip}")
+    print(f"INFO: Incoming prompt for model {chat_request.model} ip={client_ip} tier={tier.name}")
 
     # Metadatos opcionales de seguridad
     user_id = request.headers.get("X-User-Id", "anonymous")
@@ -165,17 +291,17 @@ async def proxy_chat_completions(request: Request):
     for msg in chat_request.messages:
         if msg.role != 'user':
             continue
-        # Clasificación por LLM (si está habilitada)
-        intent = classify_intent(request, msg.content, client_ip)
+        intent = classify_intent(request, msg.content, client_ip, tier)
         if intent:
             detected_intents.append(intent)
-            print(f"INFO: Intent classifier -> {intent} ip={client_ip}")
+            print(f"INFO: Intent classifier -> {intent} ip={client_ip} tier={tier.name}")
             if intent.get("is_malicious") is True:
                 return JSONResponse(status_code=403, content={
                     "error": "Blocked by intent classifier",
                     "intent": intent,
+                    "tier": tier.name,
                 })
-        # Firewall heurístico
+        # Firewall heurístico (parámetros globales por ahora)
         insp = firewall.inspect_request(user_id=user_id, prompt=msg.content, system_purpose=system_purpose)
         if insp.decision == "BLOCK":
             print(f"ALERTA: Firewall bloqueó la solicitud. ip={client_ip} score={insp.threat_score} flags={insp.flags}")
@@ -183,6 +309,7 @@ async def proxy_chat_completions(request: Request):
                 "error": "Security policy violation detected by firewall",
                 "threat_score": insp.threat_score,
                 "flags": insp.flags,
+                "tier": tier.name,
             })
 
     # Preparar la petición para Groq
@@ -190,10 +317,28 @@ async def proxy_chat_completions(request: Request):
     
     # Inyectar un mensaje de sistema con el label de intención (último) si existe
     forward_body = request_body.copy()
-    forward_body["model"] = COMPLETION_MODEL
+
+    # Selección de modelo por nivel
+    forward_body["model"] = tier.completion_model
+
+    # Respetar límites de salida del nivel
+    try:
+        user_max_tokens = int(forward_body.get("max_tokens")) if forward_body.get("max_tokens") is not None else None
+    except Exception:
+        user_max_tokens = None
+    forward_body["max_tokens"] = min(user_max_tokens, tier.max_output_tokens) if user_max_tokens else tier.max_output_tokens
+
+    # Aplicar temperatura/top_p del nivel salvo override explícito
+    if "temperature" not in forward_body:
+        forward_body["temperature"] = tier.completion_temperature
+    if "top_p" not in forward_body:
+        forward_body["top_p"] = tier.completion_top_p
+
     try:
         # Copiar mensajes de forma segura
         orig_messages = forward_body.get("messages", [])
+        # Aplicar límite de contexto aproximado por nivel
+        capped_messages = _cap_messages_to_context(orig_messages, tier.max_context_tokens)
         if detected_intents:
             last_intent = detected_intents[-1]
             system_intent_note = {
@@ -203,12 +348,10 @@ async def proxy_chat_completions(request: Request):
                     + str(last_intent.get("intent_label", "unknown"))
                 ),
             }
-            # Prepend al inicio para no alterar el último turno del usuario
-            forward_body["messages"] = [system_intent_note] + orig_messages
+            forward_body["messages"] = [system_intent_note] + capped_messages
         else:
-            forward_body["messages"] = orig_messages
+            forward_body["messages"] = capped_messages
     except Exception:
-        # Fallback sin cambios en mensajes
         forward_body["messages"] = request_body.get("messages", [])
 
     try:
@@ -224,29 +367,29 @@ async def proxy_chat_completions(request: Request):
             resp_insp = firewall.inspect_response(content_text)
             if resp_insp.flags:
                 print(f"ALERTA: Firewall detectó problemas en la respuesta. ip={client_ip} flags={resp_insp.flags}")
-                # Redactar contenido en la estructura OpenAI-like si aplica
                 if isinstance(data.get("choices"), list) and data["choices"]:
                     if "message" in data["choices"][0]:
                         data["choices"][0]["message"]["content"] = resp_insp.redacted_text
-                # Inyectar metadatos de firewall
                 data["firewall"] = {"flags": resp_insp.flags, "redacted": resp_insp.redacted_text != content_text}
             else:
                 data.setdefault("firewall", {"flags": [], "redacted": False})
 
-            # Adjuntar metadata de intención detectada (si la hubo)
+            # Adjuntar metadata de intención y nivel
             if detected_intents:
                 data["intent_layer"] = {
                     "enabled": True,
                     "last_intent": detected_intents[-1],
                 }
             else:
-                data.setdefault("intent_layer", {"enabled": ENABLE_INTENT_LAYER, "last_intent": None})
+                data.setdefault("intent_layer", {"enabled": tier.enable_intent_layer, "last_intent": None})
+
+            data["tier"] = tier.name
 
             return JSONResponse(content=data, status_code=response.status_code)
         else:
             print(f"ERROR: Error de Groq API: {response.status_code} - {response.text} ip={client_ip}")
             return JSONResponse(
-                content={"error": f"Groq API error: {response.text}"}, 
+                content={"error": f"Groq API error: {response.text}", "tier": tier.name}, 
                 status_code=response.status_code
             )
             
