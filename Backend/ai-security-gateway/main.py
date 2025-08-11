@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import List
 import requests
 from dotenv import load_dotenv
+import json
 
 # Integración del Firewall (import compatible según modo de ejecución)
 try:
@@ -14,6 +15,12 @@ except ImportError:  # ejecución directa dentro del directorio
 
 # Cargar variables de entorno
 load_dotenv()
+
+# Configuración de modelos (parametrizable por entorno)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+CLASSIFIER_MODEL = os.getenv("GROQ_CLASSIFIER_MODEL", "openai/gpt-oss-20b")
+COMPLETION_MODEL = os.getenv("GROQ_COMPLETION_MODEL", "openai/gpt-oss-20b")
+ENABLE_INTENT_LAYER = os.getenv("ENABLE_INTENT_LAYER", "true").lower() in {"1", "true", "yes"}
 
 # Instancia global del firewall
 firewall = AIFirewall()
@@ -56,6 +63,72 @@ async def add_client_ip(request: Request, call_next):
         pass
     return response
 
+# Utilidad para llamadas al endpoint OpenAI-compatible de Groq
+GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+def _build_forwarded_ip_headers(request: Request, client_ip: str) -> dict:
+    headers: dict = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    incoming_xff = request.headers.get("X-Forwarded-For")
+    if incoming_xff:
+        if client_ip and client_ip not in incoming_xff:
+            headers["X-Forwarded-For"] = f"{incoming_xff}, {client_ip}"
+        else:
+            headers["X-Forwarded-For"] = incoming_xff
+    else:
+        headers["X-Forwarded-For"] = client_ip
+    headers["X-Real-IP"] = client_ip
+    return headers
+
+# Prompt de sistema para clasificar intención y sentimiento, devolver JSON estricto
+INTENT_SYSTEM_PROMPT = (
+    "Eres un clasificador de intención y seguridad. Analiza el mensaje del usuario y responde SOLO en JSON, "
+    "sin texto adicional, con el siguiente esquema: {\n"
+    "  \"intent_label\": string en snake_case descriptivo (p.ej. 'benign_information', 'malicious_hacking', 'self_harm'),\n"
+    "  \"is_malicious\": boolean,\n"
+    "  \"sentiment\": one_of ['negative','neutral','positive'],\n"
+    "  \"categories\": array de strings con etiquetas adicionales,\n"
+    "  \"confidence\": number entre 0 y 1,\n"
+    "  \"reason\": string breve explicando la decisión\n"
+    "}. Si la petición busca daño, ilegalidad, autolesión, fraude, malware o violar políticas, marca is_malicious=true."
+)
+
+
+def classify_intent(request: Request, prompt_text: str, client_ip: str) -> dict | None:
+    if not ENABLE_INTENT_LAYER:
+        return None
+    messages = [
+        {"role": "system", "content": INTENT_SYSTEM_PROMPT},
+        {"role": "user", "content": prompt_text},
+    ]
+    payload = {
+        "model": CLASSIFIER_MODEL,
+        "messages": messages,
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "max_tokens": 256,
+        "stream": False,
+    }
+    headers = _build_forwarded_ip_headers(request, client_ip)
+    try:
+        resp = requests.post(GROQ_CHAT_URL, headers=headers, json=payload, timeout=30)
+        if resp.status_code != 200:
+            print(f"ERROR: Intent classifier error: {resp.status_code} - {resp.text} ip={client_ip}")
+            return None
+        data = resp.json()
+        text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        # Asegurar parseo JSON robusto
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            text = text[start : end + 1]
+        return json.loads(text)
+    except Exception as e:
+        print(f"ERROR: Exception in intent classification: {e} ip={client_ip}")
+        return None
+
 # Endpoint Proxy
 @app.post("/v1/chat/completions")
 async def proxy_chat_completions(request: Request):
@@ -87,42 +160,59 @@ async def proxy_chat_completions(request: Request):
     user_id = request.headers.get("X-User-Id", "anonymous")
     system_purpose = request.headers.get("X-System-Purpose", "general")
 
-    # Firewall avanzado: inspeccionar todos los mensajes del usuario
+    # Primera capa: clasificación de intención por LLM + firewall tradicional
+    detected_intents: list[dict] = []
     for msg in chat_request.messages:
-        if msg.role == 'user':
-            insp = firewall.inspect_request(user_id=user_id, prompt=msg.content, system_purpose=system_purpose)
-            if insp.decision == "BLOCK":
-                print(f"ALERTA: Firewall bloqueó la solicitud. ip={client_ip} score={insp.threat_score} flags={insp.flags}")
+        if msg.role != 'user':
+            continue
+        # Clasificación por LLM (si está habilitada)
+        intent = classify_intent(request, msg.content, client_ip)
+        if intent:
+            detected_intents.append(intent)
+            print(f"INFO: Intent classifier -> {intent} ip={client_ip}")
+            if intent.get("is_malicious") is True:
                 return JSONResponse(status_code=403, content={
-                    "error": "Security policy violation detected by firewall",
-                    "threat_score": insp.threat_score,
-                    "flags": insp.flags,
+                    "error": "Blocked by intent classifier",
+                    "intent": intent,
                 })
+        # Firewall heurístico
+        insp = firewall.inspect_request(user_id=user_id, prompt=msg.content, system_purpose=system_purpose)
+        if insp.decision == "BLOCK":
+            print(f"ALERTA: Firewall bloqueó la solicitud. ip={client_ip} score={insp.threat_score} flags={insp.flags}")
+            return JSONResponse(status_code=403, content={
+                "error": "Security policy violation detected by firewall",
+                "threat_score": insp.threat_score,
+                "flags": insp.flags,
+            })
 
     # Preparar la petición para Groq
-    groq_url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}",
-        "Content-Type": "application/json",
-    }
-
-    # Reenviar y encadenar X-Forwarded-For / X-Real-IP hacia Groq
-    incoming_xff = request.headers.get("X-Forwarded-For")
-    if incoming_xff:
-        if client_ip and client_ip not in incoming_xff:
-            headers["X-Forwarded-For"] = f"{incoming_xff}, {client_ip}"
-        else:
-            headers["X-Forwarded-For"] = incoming_xff
-    else:
-        headers["X-Forwarded-For"] = client_ip
-    headers["X-Real-IP"] = client_ip
+    headers = _build_forwarded_ip_headers(request, client_ip)
     
-    # Modificar el modelo en la petición para usar el modelo de Groq
-    groq_request_body = request_body.copy()
-    groq_request_body["model"] = "openai/gpt-oss-20b"
-    
+    # Inyectar un mensaje de sistema con el label de intención (último) si existe
+    forward_body = request_body.copy()
+    forward_body["model"] = COMPLETION_MODEL
     try:
-        response = requests.post(groq_url, headers=headers, json=groq_request_body, timeout=60)
+        # Copiar mensajes de forma segura
+        orig_messages = forward_body.get("messages", [])
+        if detected_intents:
+            last_intent = detected_intents[-1]
+            system_intent_note = {
+                "role": "system",
+                "content": (
+                    "Security Note: intent_label="
+                    + str(last_intent.get("intent_label", "unknown"))
+                ),
+            }
+            # Prepend al inicio para no alterar el último turno del usuario
+            forward_body["messages"] = [system_intent_note] + orig_messages
+        else:
+            forward_body["messages"] = orig_messages
+    except Exception:
+        # Fallback sin cambios en mensajes
+        forward_body["messages"] = request_body.get("messages", [])
+
+    try:
+        response = requests.post(GROQ_CHAT_URL, headers=headers, json=forward_body, timeout=60)
         
         if response.status_code == 200:
             data = response.json()
@@ -142,6 +232,15 @@ async def proxy_chat_completions(request: Request):
                 data["firewall"] = {"flags": resp_insp.flags, "redacted": resp_insp.redacted_text != content_text}
             else:
                 data.setdefault("firewall", {"flags": [], "redacted": False})
+
+            # Adjuntar metadata de intención detectada (si la hubo)
+            if detected_intents:
+                data["intent_layer"] = {
+                    "enabled": True,
+                    "last_intent": detected_intents[-1],
+                }
+            else:
+                data.setdefault("intent_layer", {"enabled": ENABLE_INTENT_LAYER, "last_intent": None})
 
             return JSONResponse(content=data, status_code=response.status_code)
         else:
