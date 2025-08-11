@@ -263,6 +263,16 @@ async def proxy_chat_completions(request: Request):
 async def health_check():
     return {"status": "healthy", "service": "groq-proxy"}
 
+# Nuevo: endpoint raíz para evitar 404 en "/"
+@app.get("/")
+async def root():
+    return {
+        "status": "ok",
+        "service": "groq-proxy",
+        "endpoints": ["/health", "/v1/chat/completions"],
+        "docs": "/docs"
+    }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
