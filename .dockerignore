@@ -1,0 +1,27 @@
+# Ignorar VCS y metadatos
+.git
+.gitignore
+
+# Entornos virtuales
+.venv
+venv
+ENV
+
+# Caches de Python
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+
+# Archivos temporales/OS
+.DS_Store
+*.log
+
+# Otros directorios del repo que no son necesarios para construir el gateway
+Backend/ai-security-platform/
+
+# Node/yarn (por si acaso)
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log* 
