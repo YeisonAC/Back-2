@@ -1,0 +1,20 @@
+# Ignorar caches y entornos
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.mypy_cache/
+
+# Ignorar entornos virtuales
+.venv/
+venv/
+ENV/
+
+# Ignorar lockfiles de pipenv para que el runtime use requirements.txt
+Pipfile
+Pipfile.lock
+
+# Ignorar otras carpetas no usadas en la función
+Backend/ai-security-platform/
+Backend/specs/
+**/*.md
+**/*.ipynb 
