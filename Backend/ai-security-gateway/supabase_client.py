@@ -32,7 +32,7 @@ def log_interaction(
     response_payload: Dict[str, Any],
     status: str,
     user_ip: Optional[str] = None,
-    provider: Optional[str] = "gateway",
+    layer: Optional[str] = "gateway",
     table: str = "backend_logs",
     blocked_status: Optional[str] = None,
     reason: Optional[str] = None,
@@ -44,7 +44,7 @@ def log_interaction(
         return
     try:
         payload = {
-            "provider": provider,
+            "layer": layer,
             "endpoint": endpoint,
             "status": status,
             "user_ip": user_ip,

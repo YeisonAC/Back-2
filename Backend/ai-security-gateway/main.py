@@ -444,7 +444,7 @@ async def proxy_chat_completions(request: Request):
                         },
                         status="blocked",
                         user_ip=client_ip,
-                        provider=tier.name,
+                        layer=tier.name,
                         blocked_status="blocked",
                         reason=intent.get("reason") or "intent_classifier_malicious",
                     )
@@ -477,7 +477,7 @@ async def proxy_chat_completions(request: Request):
                     },
                     status="blocked",
                     user_ip=client_ip,
-                    provider=tier.name,
+                    layer=tier.name,
                     blocked_status="blocked",
                     reason=f"firewall_flags: {', '.join(insp.flags) if insp.flags else 'BLOCK'}",
                 )
@@ -577,7 +577,7 @@ async def proxy_chat_completions(request: Request):
                     response_payload=data,
                     status="success",
                     user_ip=client_ip,
-                    provider=tier.name,
+                    layer=tier.name,
                     blocked_status="no blocked",
                     reason=None,
                 )
@@ -600,7 +600,7 @@ async def proxy_chat_completions(request: Request):
                     },
                     status="error",
                     user_ip=client_ip,
-                    provider=tier.name,
+                    layer=tier.name,
                      blocked_status="no blocked",
                      reason=f"groq_api_error: {response.status_code}",
                 )
@@ -625,7 +625,7 @@ async def proxy_chat_completions(request: Request):
                 response_payload={"error": "Request timeout to Groq API"},
                 status="error",
                 user_ip=client_ip,
-                provider=tier.name,
+                layer=tier.name,
                 blocked_status="no blocked",
                 reason="timeout",
             )
@@ -642,7 +642,7 @@ async def proxy_chat_completions(request: Request):
                 response_payload={"error": f"Error connecting to Groq API: {str(e)}"},
                 status="error",
                 user_ip=client_ip,
-                provider=tier.name,
+                layer=tier.name,
                 blocked_status="no blocked",
                 reason=f"request_exception: {str(e)}",
             )
