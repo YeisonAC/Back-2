@@ -392,6 +392,8 @@ async def proxy_chat_completions(request: Request):
                 status="error",
                 user_ip=get_client_ip(request),
                 provider="gateway",
+                blocked_status="no blocked",
+                reason=f"validation_error: {str(e)}",
             )
         except Exception:
             pass
@@ -443,6 +445,8 @@ async def proxy_chat_completions(request: Request):
                         status="blocked",
                         user_ip=client_ip,
                         provider="gateway",
+                        blocked_status="blocked",
+                        reason=intent.get("reason") or "intent_classifier_malicious",
                     )
                 except Exception:
                     pass
@@ -474,6 +478,8 @@ async def proxy_chat_completions(request: Request):
                     status="blocked",
                     user_ip=client_ip,
                     provider="gateway",
+                    blocked_status="blocked",
+                    reason=f"firewall_flags: {', '.join(insp.flags) if insp.flags else 'BLOCK'}",
                 )
             except Exception:
                 pass
@@ -572,6 +578,8 @@ async def proxy_chat_completions(request: Request):
                     status="success",
                     user_ip=client_ip,
                     provider="gateway",
+                    blocked_status="no blocked",
+                    reason=None,
                 )
             except Exception:
                 pass
@@ -593,6 +601,8 @@ async def proxy_chat_completions(request: Request):
                     status="error",
                     user_ip=client_ip,
                     provider="gateway",
+                     blocked_status="no blocked",
+                     reason=f"groq_api_error: {response.status_code}",
                 )
             except Exception:
                 pass
@@ -616,6 +626,8 @@ async def proxy_chat_completions(request: Request):
                 status="error",
                 user_ip=client_ip,
                 provider="gateway",
+                blocked_status="no blocked",
+                reason="timeout",
             )
         except Exception:
             pass
@@ -631,6 +643,8 @@ async def proxy_chat_completions(request: Request):
                 status="error",
                 user_ip=client_ip,
                 provider="gateway",
+                blocked_status="no blocked",
+                reason=f"request_exception: {str(e)}",
             )
         except Exception:
             pass

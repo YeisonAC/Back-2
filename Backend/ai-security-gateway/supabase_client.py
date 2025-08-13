@@ -34,6 +34,8 @@ def log_interaction(
     user_ip: Optional[str] = None,
     provider: Optional[str] = "gateway",
     table: str = "backend_logs",
+    blocked_status: Optional[str] = None,
+    reason: Optional[str] = None,
 ) -> None:
     sb = get_supabase()
     if sb is None:
@@ -41,14 +43,21 @@ def log_interaction(
             print("[SUPABASE] log_interaction: Supabase client unavailable; skipping insert")
         return
     try:
-        sb.table(table).insert({
+        payload = {
             "provider": provider,
             "endpoint": endpoint,
             "status": status,
             "user_ip": user_ip,
             "request_payload": request_payload,
             "response_payload": response_payload,
-        }).execute()
+        }
+        # Campos nuevos opcionales
+        if blocked_status is not None:
+            payload["blocked_status"] = blocked_status
+        if reason is not None:
+            payload["reason"] = reason
+
+        sb.table(table).insert(payload).execute()
         if _DEBUG:
             print("[SUPABASE] log_interaction: insert ok")
     except Exception as e:
