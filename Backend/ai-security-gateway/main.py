@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import List, Optional, Tuple, Set
 import requests
 from dotenv import load_dotenv
+from pathlib import Path
 import json
 from dataclasses import dataclass
 import ipaddress
@@ -15,8 +16,14 @@ try:
 except ImportError:  # ejecución directa dentro del directorio
     from ai_firewall import AIFirewall
 
-# Cargar variables de entorno
-load_dotenv()
+# Integración Supabase (import compatible)
+try:
+    from .supabase_client import log_interaction
+except ImportError:
+    from supabase_client import log_interaction
+
+# Cargar variables de entorno desde el .env en este mismo directorio
+load_dotenv(dotenv_path=Path(__file__).with_name('.env'))
 
 # Configuración de modelos (parametrizable por entorno)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -377,6 +384,17 @@ async def proxy_chat_completions(request: Request):
     try:
         chat_request = ChatCompletionRequest(**request_body)
     except Exception as e:
+        try:
+            log_interaction(
+                endpoint="/v1/chat/completions",
+                request_payload=request_body if isinstance(request_body, dict) else {"raw": str(request_body)},
+                response_payload={"error": f"Error de validación: {str(e)}"},
+                status="error",
+                user_ip=get_client_ip(request),
+                provider="gateway",
+            )
+        except Exception:
+            pass
         raise HTTPException(status_code=400, detail=f"Error de validación: {str(e)}")
     
     # Selección de nivel
@@ -411,6 +429,23 @@ async def proxy_chat_completions(request: Request):
             print(f"INFO: Intent classifier -> {intent} ip={client_ip} tier={tier.name}")
             if intent.get("is_malicious") is True:
                 primary = pick_primary_label(security_labels)
+                try:
+                    log_interaction(
+                        endpoint="/v1/chat/completions",
+                        request_payload=request_body if isinstance(request_body, dict) else {"raw": str(request_body)},
+                        response_payload={
+                            "error": "Blocked by intent classifier",
+                            "intent": intent,
+                            "tier": tier.name,
+                            "security_labels": sorted(list(security_labels)),
+                            "primary_security_label": primary,
+                        },
+                        status="blocked",
+                        user_ip=client_ip,
+                        provider="gateway",
+                    )
+                except Exception:
+                    pass
                 return JSONResponse(status_code=403, content={
                     "error": "Blocked by intent classifier",
                     "intent": intent,
@@ -424,6 +459,24 @@ async def proxy_chat_completions(request: Request):
         if insp.decision == "BLOCK":
             print(f"ALERTA: Firewall bloqueó la solicitud. ip={client_ip} score={insp.threat_score} flags={insp.flags}")
             primary = pick_primary_label(security_labels)
+            try:
+                log_interaction(
+                    endpoint="/v1/chat/completions",
+                    request_payload=request_body if isinstance(request_body, dict) else {"raw": str(request_body)},
+                    response_payload={
+                        "error": "Security policy violation detected by firewall",
+                        "threat_score": insp.threat_score,
+                        "flags": insp.flags,
+                        "tier": tier.name,
+                        "security_labels": sorted(list(security_labels)),
+                        "primary_security_label": primary,
+                    },
+                    status="blocked",
+                    user_ip=client_ip,
+                    provider="gateway",
+                )
+            except Exception:
+                pass
             return JSONResponse(status_code=403, content={
                 "error": "Security policy violation detected by firewall",
                 "threat_score": insp.threat_score,
@@ -511,10 +564,38 @@ async def proxy_chat_completions(request: Request):
             data["security_labels"] = sorted(list(security_labels))
             data["primary_security_label"] = primary
 
+            try:
+                log_interaction(
+                    endpoint="/v1/chat/completions",
+                    request_payload=forward_body,
+                    response_payload=data,
+                    status="success",
+                    user_ip=client_ip,
+                    provider="gateway",
+                )
+            except Exception:
+                pass
+
             return JSONResponse(content=data, status_code=response.status_code)
         else:
             print(f"ERROR: Error de Groq API: {response.status_code} - {response.text} ip={client_ip}")
             primary = pick_primary_label(security_labels)
+            try:
+                log_interaction(
+                    endpoint="/v1/chat/completions",
+                    request_payload=forward_body,
+                    response_payload={
+                        "error": f"Groq API error: {response.text}",
+                        "tier": tier.name,
+                        "security_labels": sorted(list(security_labels)),
+                        "primary_security_label": primary,
+                    },
+                    status="error",
+                    user_ip=client_ip,
+                    provider="gateway",
+                )
+            except Exception:
+                pass
             return JSONResponse(
                 content={
                     "error": f"Groq API error: {response.text}",
@@ -527,10 +608,32 @@ async def proxy_chat_completions(request: Request):
             
     except requests.exceptions.Timeout:
         print(f"ERROR: Timeout en la petición a Groq ip={client_ip}")
+        try:
+            log_interaction(
+                endpoint="/v1/chat/completions",
+                request_payload=forward_body if isinstance(locals().get("forward_body"), dict) else {},
+                response_payload={"error": "Request timeout to Groq API"},
+                status="error",
+                user_ip=client_ip,
+                provider="gateway",
+            )
+        except Exception:
+            pass
         raise HTTPException(status_code=504, detail="Request timeout to Groq API")
     
     except requests.exceptions.RequestException as e:
         print(f"ERROR: Error en la petición a Groq: {str(e)} ip={client_ip}")
+        try:
+            log_interaction(
+                endpoint="/v1/chat/completions",
+                request_payload=forward_body if isinstance(locals().get("forward_body"), dict) else {},
+                response_payload={"error": f"Error connecting to Groq API: {str(e)}"},
+                status="error",
+                user_ip=client_ip,
+                provider="gateway",
+            )
+        except Exception:
+            pass
         raise HTTPException(status_code=502, detail=f"Error connecting to Groq API: {str(e)}")
 
 # Endpoint de salud

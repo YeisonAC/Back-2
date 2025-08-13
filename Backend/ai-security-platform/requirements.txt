@@ -18,5 +18,8 @@ Flask-Marshmallow==0.15.0
 # Manejo de variables de entorno
 python-dotenv==1.0.0
 
+# Telemetría / Logs en Supabase
+supabase==2.5.1
+
 # Servidor de producción (lo usaremos más adelante)
 gunicorn==21.2.0 

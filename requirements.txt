@@ -3,3 +3,4 @@ pydantic
 requests
 python-dotenv
 uvicorn 
+supabase==2.5.1
