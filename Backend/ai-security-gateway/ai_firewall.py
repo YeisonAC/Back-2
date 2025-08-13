@@ -35,6 +35,11 @@ class AIFirewall:
             "olvida todo lo anterior",
             "forget all previous",
             "disregard all prior",
+            "ignore all previous",
+            "ignore all prior",
+            "override safety",
+            "bypass safety",
+            "you must ignore",
         ]
         self.system_prompt_leak_phrases = [
             "repeat your instructions",
@@ -42,17 +47,28 @@ class AIFirewall:
             "what are your hidden instructions",
             "muestra tu prompt de sistema",
             "repite tus instrucciones",
+            "print the system prompt",
+            "reveal the system prompt",
+            "display your system prompt",
+            "tell me your instructions",
         ]
         self.malicious_role_play_phrases = [
             "you are dan",
             "act as dan",
             "actúa como dan",
             "jailbreak mode",
+            "developer mode",
+            "dev mode",
+            "no restrictions",
+            "unfiltered",
+            "no longer bound by",
         ]
         # Regex para obfuscación de palabras clave como i-g-n-o-r-e
         self.obfuscation_patterns = [
             re.compile(r"i\W*g\W*n\W*o\W*r\W*e", re.IGNORECASE),
             re.compile(r"s\W*y\W*s\W*t\W*e\W*m\W*\W*p\W*r\W*o\W*m\W*p\W*t", re.IGNORECASE),
+            re.compile(r"j\W*a\W*i\W*l\W*b\W*r\W*e\W*a\W*k", re.IGNORECASE),
+            re.compile(r"d\W*a\W*n", re.IGNORECASE),
         ]
         # Patrones DLP de entrada (sensibles en prompts)
         self.input_dlp_patterns = [
@@ -115,18 +131,32 @@ class AIFirewall:
         flags: List[str] = []
 
         lower = prompt.lower()
-        if any(phrase in lower for phrase in self.override_phrases):
+        has_override = any(phrase in lower for phrase in self.override_phrases)
+        if has_override:
             score += 2
             flags.append("OverridePhrase")
-        if any(phrase in lower for phrase in self.system_prompt_leak_phrases):
+        has_sysleak = any(phrase in lower for phrase in self.system_prompt_leak_phrases)
+        if has_sysleak:
             score += 2
             flags.append("SystemPromptLeak")
-        if any(phrase in lower for phrase in self.malicious_role_play_phrases):
+        has_roleplay = any(phrase in lower for phrase in self.malicious_role_play_phrases)
+        if has_roleplay:
             score += 2
             flags.append("MaliciousRolePlay")
         if any(p.search(prompt) for p in self.obfuscation_patterns):
             score += 1
             flags.append("ObfuscationPattern")
+        # Combinaciones que indican inyección más fuerte
+        combo_count = 0
+        if has_override and has_sysleak:
+            combo_count += 1
+        if has_override and has_roleplay:
+            combo_count += 1
+        if has_sysleak and has_roleplay:
+            combo_count += 1
+        if combo_count:
+            score += combo_count  # bonificación acumulativa
+            flags.append("PromptInjectionChain")
         # DLP de entrada severo: eleva la puntuación para alcanzar umbral de bloqueo
         if any(p.search(prompt) for p in self.input_dlp_patterns):
             score += 5
@@ -153,6 +183,14 @@ class AIFirewall:
         if any(k in lower for k in restricted_keywords):
             score += 3
             flags.append("IntentConflict")
+        # Indicadores típicos de jailbreak: pedir deshabilitar políticas y actuar sin restricciones
+        jail_keywords = [
+            "act without restrictions", "ignore content policy", "bypass policy",
+            "pretend to be dan", "switch to developer mode"
+        ]
+        if any(k in lower for k in jail_keywords):
+            score += 2
+            flags.append("MaliciousRolePlay")
 
         return score, flags
 
@@ -218,7 +256,9 @@ class AIFirewall:
 
         # Jailbreak confirmation scanning
         jailbreak_markers = [
-            "as dan", "as jailbreak", "developer mode enabled", "now ignoring safety"
+            "as dan", "as jailbreak", "developer mode enabled", "now ignoring safety",
+            "i am in developer mode", "unfiltered mode enabled", "jailbreak successful",
+            "policies disabled"
         ]
         lower = redacted.lower()
         if any(m in lower for m in jailbreak_markers):
