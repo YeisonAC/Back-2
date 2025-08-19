@@ -30,6 +30,12 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 CLASSIFIER_MODEL = os.getenv("GROQ_CLASSIFIER_MODEL", "openai/gpt-oss-20b")
 COMPLETION_MODEL = os.getenv("GROQ_COMPLETION_MODEL", "openai/gpt-oss-20b")
 ENABLE_INTENT_LAYER = os.getenv("ENABLE_INTENT_LAYER", "true").lower() in {"1", "true", "yes"}
+SERVICE_NAME = os.getenv("SERVICE_NAME", "EONS-L1")
+# Lista separada por comas de claves válidas para el gateway (nombrada como EONS_API)
+EONS_API_KEYS_RAW = os.getenv("EONS_API_KEYS", "")
+
+# Conjunto de API Keys permitidas (separadas por comas en la env var EONS_API_KEYS)
+ALLOWED_API_KEYS: set[str] = set(k.strip() for k in EONS_API_KEYS_RAW.split(",") if k.strip())
 
 @dataclass
 class TierConfig:
@@ -293,6 +299,69 @@ class ChatCompletionRequest(BaseModel):
 
 # Instancia de FastAPI
 app = FastAPI()
+
+# Middleware de autenticación por API Key (antes que otros middlewares)
+EXEMPT_PATHS = {"/", "/health"}
+
+def _extract_api_key(request: Request) -> str | None:
+    # 1) Encabezado EONS_API (principal)
+    api_key = request.headers.get("EONS_API") or request.headers.get("eons_api")
+    if api_key:
+        return api_key.strip()
+    # 2) Encabezado X-API-Key (compatibilidad)
+    api_key = request.headers.get("X-API-Key") or request.headers.get("x-api-key")
+    if api_key:
+        return api_key.strip()
+    # 3) Authorization: Bearer <key>
+    auth = request.headers.get("Authorization") or request.headers.get("authorization")
+    if auth and auth.lower().startswith("bearer "):
+        return auth.split(" ", 1)[1].strip()
+    return None
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    # Permitir paths exentos (salud y raíz)
+    if request.url.path in EXEMPT_PATHS:
+        return await call_next(request)
+    # Si no hay claves configuradas, bloquear todo excepto exentos
+    if not ALLOWED_API_KEYS:
+        # Opcionalmente podríamos permitir si estamos en desarrollo, pero por seguridad: bloquear
+        detail = "API Key authentication not configured"
+        try:
+            log_interaction(
+                endpoint=request.url.path,
+                request_payload={},
+                response_payload={"error": detail},
+                status="blocked",
+                user_ip=get_client_ip(request),
+                layer=_normalize_tier_name(request.headers.get("X-Layer") or request.query_params.get("layer")),
+                blocked_status="blocked",
+                reason="no_keys_configured",
+            )
+        except Exception:
+            pass
+        return JSONResponse(status_code=401, content={"error": detail})
+
+    key = _extract_api_key(request)
+    if not key or key not in ALLOWED_API_KEYS:
+        detail = "Missing or invalid API key"
+        try:
+            log_interaction(
+                endpoint=request.url.path,
+                request_payload={},
+                response_payload={"error": detail},
+                status="blocked",
+                user_ip=get_client_ip(request),
+                layer=_normalize_tier_name(request.headers.get("X-Layer") or request.query_params.get("layer")),
+                blocked_status="blocked",
+                reason="missing_or_invalid_api_key",
+            )
+        except Exception:
+            pass
+        return JSONResponse(status_code=401, content={"error": detail})
+
+    # API Key válida
+    return await call_next(request)
 
 # Middleware para capturar IP del cliente y anexarla a la respuesta
 @app.middleware("http")
@@ -664,14 +733,14 @@ async def proxy_chat_completions(request: Request):
 # Endpoint de salud
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "groq-proxy"}
+    return {"status": "healthy", "service": SERVICE_NAME}
 
 # Nuevo: endpoint raíz para evitar 404 en "/"
 @app.get("/")
 async def root():
     return {
         "status": "ok",
-        "service": "groq-proxy",
+        "service": SERVICE_NAME,
         "endpoints": ["/health", "/v1/chat/completions"],
         "docs": "/docs"
     }
