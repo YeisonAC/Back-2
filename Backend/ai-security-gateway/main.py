@@ -22,6 +22,17 @@ try:
 except ImportError:
     from supabase_client import log_interaction
 
+# ML1 (Multi Layer) pipeline (import compatible)
+try:
+    from .ml1 import run_ml1_pipeline
+except ImportError:
+    from ml1 import run_ml1_pipeline
+# Gestor de API Keys (import compatible)
+try:
+    from .api_keys import create_api_key, verify_api_key, revoke_api_key, parse_full_key
+except ImportError:
+    from api_keys import create_api_key, verify_api_key, revoke_api_key, parse_full_key
+
 # Cargar variables de entorno desde el .env en este mismo directorio
 load_dotenv(dotenv_path=Path(__file__).with_name('.env'))
 
@@ -33,6 +44,11 @@ ENABLE_INTENT_LAYER = os.getenv("ENABLE_INTENT_LAYER", "true").lower() in {"1", 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "EONS-L1")
 # Lista separada por comas de claves válidas para el gateway (nombrada como EONS_API)
 EONS_API_KEYS_RAW = os.getenv("EONS_API_KEYS", "")
+
+# Clave de administración para endpoints /admin
+EONS_ADMIN_KEY = (os.getenv("EONS_ADMIN_KEY", "") or "").strip()
+if not EONS_ADMIN_KEY:
+    print("WARN: EONS_ADMIN_KEY is not set; /admin endpoints will always return 403")
 
 # Conjunto de API Keys permitidas (separadas por comas en la env var EONS_API_KEYS)
 ALLOWED_API_KEYS: set[str] = set(k.strip() for k in EONS_API_KEYS_RAW.split(",") if k.strip())
@@ -104,6 +120,19 @@ TIER_CONFIGS: dict[str, TierConfig] = {
         classifier_retries=2,
         enable_intent_layer=True,
     ),
+    "ML1": TierConfig(
+        name="ML1",
+        max_context_tokens=16000,
+        max_output_tokens=1024,
+        completion_model=_env_or(COMPLETION_MODEL, "ML1_COMPLETION_MODEL"),
+        completion_temperature=0.2,
+        completion_top_p=0.9,
+        classifier_model=_env_or(CLASSIFIER_MODEL, "ML1_CLASSIFIER_MODEL"),
+        classifier_temperature=0.0,
+        classifier_max_tokens=256,
+        classifier_retries=0,
+        enable_intent_layer=False,
+    ),
 }
 
 
@@ -117,6 +146,8 @@ def _normalize_tier_name(raw: Optional[str]) -> str:
         return "L1-medium"
     if v in {"pro", "l1-pro", "l1_pro"}:
         return "L1-pro"
+    if v in {"ml1", "multi-layer", "multi_layer"}:
+        return "ML1"
     return "L1-mini"
 
 
@@ -290,7 +321,7 @@ class ChatMessage(BaseModel):
     content: str
 
 class ChatCompletionRequest(BaseModel):
-    model: str
+    model: Optional[str] = None
     messages: List[ChatMessage]
     temperature: float = 0.7
     max_tokens: int | None = None
@@ -321,7 +352,7 @@ def _extract_api_key(request: Request) -> str | None:
 @app.middleware("http")
 async def require_api_key(request: Request, call_next):
     # Permitir paths exentos (salud y raíz)
-    if request.url.path in EXEMPT_PATHS:
+    if request.url.path in EXEMPT_PATHS or request.url.path.startswith("/admin"):
         return await call_next(request)
     # Si no hay claves configuradas, bloquear todo excepto exentos
     if not ALLOWED_API_KEYS:
@@ -337,13 +368,44 @@ async def require_api_key(request: Request, call_next):
                 layer=_normalize_tier_name(request.headers.get("X-Layer") or request.query_params.get("layer")),
                 blocked_status="blocked",
                 reason="no_keys_configured",
+                api_key_id=getattr(request.state, "api_key_id", None),
             )
         except Exception:
             pass
         return JSONResponse(status_code=401, content={"error": detail})
 
     key = _extract_api_key(request)
-    if not key or key not in ALLOWED_API_KEYS:
+    if not key:
+        detail = "Missing or invalid API key"
+        try:
+            log_interaction(
+                endpoint=request.url.path,
+                request_payload={},
+                response_payload={"error": detail},
+                status="blocked",
+                user_ip=get_client_ip(request),
+                layer=_normalize_tier_name(request.headers.get("X-Layer") or request.query_params.get("layer")),
+                blocked_status="blocked",
+                reason="missing_or_invalid_api_key",
+                api_key_id=getattr(request.state, "api_key_id", None),
+            )
+        except Exception:
+            pass
+        return JSONResponse(status_code=401, content={"error": detail})
+
+    # 1) Intentar validar contra Supabase (formato EONS_<keyid>.<secret>)
+    try:
+        ok, key_id = verify_api_key(key)
+    except Exception:
+        ok, key_id = (False, None)
+
+    # 2) Fallback a variables de entorno si no pasó verificación
+    if not ok:
+        if ALLOWED_API_KEYS and key in ALLOWED_API_KEYS:
+            ok = True
+            key_id = None
+
+    if not ok:
         detail = "Missing or invalid API key"
         try:
             log_interaction(
@@ -360,6 +422,12 @@ async def require_api_key(request: Request, call_next):
             pass
         return JSONResponse(status_code=401, content={"error": detail})
 
+    # API Key válida; adjuntar key_id (si existe)
+    try:
+        request.state.api_key_id = key_id
+    except Exception:
+        pass
+    
     # API Key válida
     return await call_next(request)
 
@@ -375,6 +443,58 @@ async def add_client_ip(request: Request, call_next):
     except Exception:
         pass
     return response
+
+# -------- Admin: Gestión de API Keys --------
+class CreateKeyRequest(BaseModel):
+    name: str
+    rate_limit: Optional[int] = None
+
+
+def _is_admin(request: Request) -> bool:
+    if not EONS_ADMIN_KEY:
+        return False
+    admin = request.headers.get("EONS_ADMIN") or request.headers.get("X-Admin-Key")
+    if admin and admin == EONS_ADMIN_KEY:
+        return True
+    auth = request.headers.get("Authorization") or request.headers.get("authorization")
+    if auth and auth.lower().startswith("bearer "):
+        token = auth.split(" ", 1)[1].strip()
+        return token == EONS_ADMIN_KEY
+    return False
+
+
+@app.post("/admin/api-keys")
+async def admin_create_api_key(request: Request, body: CreateKeyRequest):
+    if not _is_admin(request):
+        raise HTTPException(status_code=403, detail="Forbidden: admin key required")
+    full = create_api_key(name=body.name, rate_limit=body.rate_limit, created_by="admin")
+    if not full:
+        raise HTTPException(status_code=500, detail="Failed to create API key")
+    key_id, _secret = parse_full_key(full)
+    return {"key_id": key_id, "api_key": full}
+
+
+@app.post("/admin/api-keys/{key_id}/revoke")
+async def admin_revoke_api_key(request: Request, key_id: str):
+    if not _is_admin(request):
+        raise HTTPException(status_code=403, detail="Forbidden: admin key required")
+    ok = revoke_api_key(key_id)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to revoke API key")
+    return {"key_id": key_id, "revoked": True}
+
+
+@app.get("/admin/whoami")
+async def admin_whoami(request: Request):
+    """Diagnóstico: indica si el servidor tiene admin key configurada y si esta request es admin."""
+    try:
+        is_admin = _is_admin(request)
+    except Exception:
+        is_admin = False
+    return {
+        "admin_env_configured": bool(EONS_ADMIN_KEY),
+        "is_admin": is_admin,
+    }
 
 # Utilidad para llamadas al endpoint OpenAI-compatible de Groq
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -474,6 +594,7 @@ async def proxy_chat_completions(request: Request):
                 layer=_normalize_tier_name(request.headers.get("X-Layer") or request.query_params.get("layer")),
                 blocked_status="no blocked",
                 reason=f"validation_error: {str(e)}",
+                api_key_id=getattr(request.state, "api_key_id", None),
             )
         except Exception:
             pass
@@ -481,6 +602,14 @@ async def proxy_chat_completions(request: Request):
     
     # Selección de nivel
     tier = _select_tier(request)
+
+    # Desvío temprano: ML1 usa pipeline propio (HF + DSPy)
+    if tier.name == "ML1":
+        try:
+            data = run_ml1_pipeline(request_body)
+            return JSONResponse(content=data, status_code=200)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"ML1 error: {str(e)}")
 
     # Obtener IP del cliente con utilidades robustas
     try:
@@ -490,7 +619,7 @@ async def proxy_chat_completions(request: Request):
     if not client_ip:
         client_ip = get_client_ip(request)
 
-    print(f"INFO: Incoming prompt for model {chat_request.model} ip={client_ip} tier={tier.name}")
+    print(f"INFO: Incoming prompt ip={client_ip} tier={tier.name} enforced_model={tier.completion_model}")
 
     # Metadatos opcionales de seguridad
     user_id = request.headers.get("X-User-Id", "anonymous")
@@ -527,6 +656,7 @@ async def proxy_chat_completions(request: Request):
                         layer=tier.name,
                         blocked_status="blocked",
                         reason=intent.get("reason") or "intent_classifier_malicious",
+                        api_key_id=getattr(request.state, "api_key_id", None),
                     )
                 except Exception:
                     pass
@@ -560,6 +690,7 @@ async def proxy_chat_completions(request: Request):
                     layer=tier.name,
                     blocked_status="blocked",
                     reason=f"firewall_flags: {', '.join(insp.flags) if insp.flags else 'BLOCK'}",
+                    api_key_id=getattr(request.state, "api_key_id", None),
                 )
             except Exception:
                 pass
@@ -660,6 +791,10 @@ async def proxy_chat_completions(request: Request):
                     layer=tier.name,
                     blocked_status="no blocked",
                     reason=None,
+                    api_key_id=getattr(request.state, "api_key_id", None),
+                    prompt_tokens=(data.get("usage", {}) or {}).get("prompt_tokens"),
+                    completion_tokens=(data.get("usage", {}) or {}).get("completion_tokens"),
+                    total_tokens=(data.get("usage", {}) or {}).get("total_tokens"),
                 )
             except Exception:
                 pass
@@ -683,6 +818,7 @@ async def proxy_chat_completions(request: Request):
                     layer=tier.name,
                      blocked_status="no blocked",
                      reason=f"groq_api_error: {response.status_code}",
+                     api_key_id=getattr(request.state, "api_key_id", None),
                 )
             except Exception:
                 pass
@@ -708,6 +844,7 @@ async def proxy_chat_completions(request: Request):
                 layer=tier.name,
                 blocked_status="no blocked",
                 reason="timeout",
+                api_key_id=getattr(request.state, "api_key_id", None),
             )
         except Exception:
             pass

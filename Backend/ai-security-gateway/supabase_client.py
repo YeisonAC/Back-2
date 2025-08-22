@@ -36,6 +36,11 @@ def log_interaction(
     table: str = "backend_logs",
     blocked_status: Optional[str] = None,
     reason: Optional[str] = None,
+    # Nuevos campos para seguimiento por API key y uso
+    api_key_id: Optional[str] = None,
+    prompt_tokens: Optional[int] = None,
+    completion_tokens: Optional[int] = None,
+    total_tokens: Optional[int] = None,
 ) -> None:
     sb = get_supabase()
     if sb is None:
@@ -56,6 +61,15 @@ def log_interaction(
             payload["blocked_status"] = blocked_status
         if reason is not None:
             payload["reason"] = reason
+        if api_key_id is not None:
+            payload["api_key_id"] = api_key_id
+        # Token usage (si está disponible)
+        if prompt_tokens is not None:
+            payload["prompt_tokens"] = prompt_tokens
+        if completion_tokens is not None:
+            payload["completion_tokens"] = completion_tokens
+        if total_tokens is not None:
+            payload["total_tokens"] = total_tokens
 
         sb.table(table).insert(payload).execute()
         if _DEBUG:
