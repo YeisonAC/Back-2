@@ -12,9 +12,11 @@ ENV/
 # Ignorar lockfiles de pipenv para que el runtime use requirements.txt
 Pipfile
 Pipfile.lock
+# Evitar que Vercel instale deps de este archivo (usa requirements-vercel.txt vía installCommand)
+requirements.txt
 
 # Ignorar otras carpetas no usadas en la función
 Backend/ai-security-platform/
 Backend/specs/
 **/*.md
-**/*.ipynb 
+**/*.ipynb

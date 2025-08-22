@@ -5,7 +5,8 @@
   "functions": {
     "api/index.py": {
       "maxDuration": 60,
-      "includeFiles": "Backend/ai-security-gateway/**/*.py"
+      "includeFiles": "Backend/ai-security-gateway/**",
+      "excludeFiles": "Backend/ai-security-gateway/ml1.py"
     }
   },
   "rewrites": [
