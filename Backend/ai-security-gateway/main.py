@@ -22,11 +22,9 @@ try:
 except ImportError:
     from supabase_client import log_interaction
 
-# ML1 (Multi Layer) pipeline (import compatible)
-try:
-    from .ml1 import run_ml1_pipeline
-except ImportError:
-    from ml1 import run_ml1_pipeline
+# ML1 (Multi Layer) pipeline
+# Nota: evitamos importar en tiempo de módulo para no requerir dependencias pesadas (p.ej., dspy-ai) en Vercel.
+# Hacemos import perezoso dentro de la rama ML1.
 # Gestor de API Keys (import compatible)
 try:
     from .api_keys import create_api_key, verify_api_key, revoke_api_key, parse_full_key
@@ -603,8 +601,15 @@ async def proxy_chat_completions(request: Request):
     # Selección de nivel
     tier = _select_tier(request)
 
-    # Desvío temprano: ML1 usa pipeline propio (HF + DSPy)
+    # Desvío temprano: ML1 usa pipeline propio (HF + DSPy) con import perezoso
     if tier.name == "ML1":
+        try:
+            try:
+                from .ml1 import run_ml1_pipeline  # type: ignore
+            except ImportError:
+                from ml1 import run_ml1_pipeline  # type: ignore
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"ML1 no disponible en este despliegue: {str(e)}")
         try:
             data = run_ml1_pipeline(request_body)
             return JSONResponse(content=data, status_code=200)

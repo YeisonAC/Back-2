@@ -1,0 +1,5 @@
+fastapi
+pydantic
+requests
+python-dotenv
+supabase==2.5.1
