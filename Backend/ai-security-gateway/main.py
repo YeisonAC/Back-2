@@ -9,6 +9,12 @@ from pathlib import Path
 import json
 from dataclasses import dataclass
 import ipaddress
+from collections import defaultdict, deque
+from time import time
+try:
+    from fastapi.middleware.cors import CORSMiddleware
+except Exception:
+    CORSMiddleware = None  # type: ignore
 
 # Integración del Firewall (import compatible según modo de ejecución)
 try:
@@ -50,6 +56,18 @@ if not EONS_ADMIN_KEY:
 
 # Conjunto de API Keys permitidas (separadas por comas en la env var EONS_API_KEYS)
 ALLOWED_API_KEYS: set[str] = set(k.strip() for k in EONS_API_KEYS_RAW.split(",") if k.strip())
+
+# Flags de Playground (pruebas sin API Key)
+PLAYGROUND_ENABLED = os.getenv("PLAYGROUND_ENABLED", "false").lower() in {"1", "true", "yes"}
+PLAYGROUND_TOKEN = (os.getenv("PLAYGROUND_TOKEN", "") or "").strip()
+try:
+    PLAYGROUND_RATE_LIMIT_PER_MIN = int(os.getenv("PLAYGROUND_RATE_LIMIT_PER_MIN", "30"))
+except Exception:
+    PLAYGROUND_RATE_LIMIT_PER_MIN = 30
+
+# Orígenes permitidos para CORS (solo si se define)
+_allowed_origins_env = (os.getenv("PLAYGROUND_ALLOWED_ORIGINS", "") or "").strip()
+PLAYGROUND_ALLOWED_ORIGINS = [o.strip() for o in _allowed_origins_env.split(",") if o.strip()]
 
 @dataclass
 class TierConfig:
@@ -329,6 +347,16 @@ class ChatCompletionRequest(BaseModel):
 # Instancia de FastAPI
 app = FastAPI()
 
+# Configurar CORS si corresponde
+if PLAYGROUND_ALLOWED_ORIGINS and CORSMiddleware is not None:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=PLAYGROUND_ALLOWED_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
 # Middleware de autenticación por API Key (antes que otros middlewares)
 EXEMPT_PATHS = {"/", "/health"}
 
@@ -349,8 +377,12 @@ def _extract_api_key(request: Request) -> str | None:
 
 @app.middleware("http")
 async def require_api_key(request: Request, call_next):
-    # Permitir paths exentos (salud y raíz)
-    if request.url.path in EXEMPT_PATHS or request.url.path.startswith("/admin"):
+    # Permitir paths exentos (salud y raíz) y playground/admin
+    if (
+        request.url.path in EXEMPT_PATHS
+        or request.url.path.startswith("/admin")
+        or request.url.path.startswith("/playground")
+    ):
         return await call_next(request)
     # Si no hay claves configuradas, bloquear todo excepto exentos
     if not ALLOWED_API_KEYS:
@@ -442,6 +474,21 @@ async def add_client_ip(request: Request, call_next):
         pass
     return response
 
+# -------- Rate limiting simple por IP para Playground --------
+_ip_window: dict[str, deque[float]] = defaultdict(deque)
+_WINDOW_SECONDS = 60.0
+
+def _playground_allow_ip(ip: str) -> bool:
+    now = time()
+    q = _ip_window[ip]
+    # limpiar entradas viejas
+    while q and (now - q[0]) > _WINDOW_SECONDS:
+        q.popleft()
+    if len(q) >= max(1, PLAYGROUND_RATE_LIMIT_PER_MIN):
+        return False
+    q.append(now)
+    return True
+
 # -------- Admin: Gestión de API Keys --------
 class CreateKeyRequest(BaseModel):
     name: str
@@ -493,6 +540,21 @@ async def admin_whoami(request: Request):
         "admin_env_configured": bool(EONS_ADMIN_KEY),
         "is_admin": is_admin,
     }
+
+# -------- Playground (sin API Key) --------
+@app.post("/playground/chat")
+async def playground_chat(request: Request):
+    if not PLAYGROUND_ENABLED:
+        raise HTTPException(status_code=404, detail="Playground is disabled")
+    if PLAYGROUND_TOKEN:
+        tok = request.headers.get("X-Playground-Token") or request.headers.get("x-playground-token")
+        if not tok or tok != PLAYGROUND_TOKEN:
+            raise HTTPException(status_code=401, detail="Playground token required")
+    client_ip = get_client_ip(request)
+    if not _playground_allow_ip(client_ip):
+        raise HTTPException(status_code=429, detail="Playground rate limit exceeded")
+    # Delegar en el handler existente (middleware de API key está bypass para /playground)
+    return await proxy_chat_completions(request)
 
 # Utilidad para llamadas al endpoint OpenAI-compatible de Groq
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"

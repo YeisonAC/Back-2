@@ -11,12 +11,38 @@ def get_supabase() -> Optional[Client]:
     global _SUPABASE_CLIENT
     if _SUPABASE_CLIENT is not None:
         return _SUPABASE_CLIENT
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_KEY")
+    # Permitir múltiples nombres de variables de entorno.
+    # Priorizar SERVICE_ROLE para operaciones administrativas (crear/revocar claves),
+    # luego SUPABASE_KEY genérica; como último recurso, aceptar la anon key pública.
+    url = (
+        os.getenv("SUPABASE_URL")
+        or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
+    )
+    key = (
+        os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        or os.getenv("SUPABASE_SERVICE_KEY")
+        or os.getenv("SUPABASE_KEY")
+        or os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
+    )
+
     if not url or not key:
         if _DEBUG:
-            print("[SUPABASE] get_supabase: missing SUPABASE_URL or SUPABASE_KEY")
+            print(
+                "[SUPABASE] get_supabase: missing URL or KEY. Tried SUPABASE_URL/NEXT_PUBLIC_SUPABASE_URL "
+                "and SUPABASE_SERVICE_ROLE_KEY/SUPABASE_SERVICE_KEY/SUPABASE_KEY/NEXT_PUBLIC_SUPABASE_ANON_KEY"
+            )
         return None
+
+    if _DEBUG:
+        key_type = (
+            "service_role" if os.getenv("SUPABASE_SERVICE_ROLE_KEY") else
+            ("service" if os.getenv("SUPABASE_SERVICE_KEY") else
+             ("generic" if os.getenv("SUPABASE_KEY") else "anon"))
+        )
+        print(f"[SUPABASE] Creating client. URL from: {'SUPABASE_URL' if os.getenv('SUPABASE_URL') else 'NEXT_PUBLIC_SUPABASE_URL'}; KEY type: {key_type}")
+        if key_type == "anon":
+            print("[SUPABASE][WARN] Using ANON key. Admin operations may fail due to RLS permissions.")
+
     try:
         _SUPABASE_CLIENT = create_client(url, key)
         return _SUPABASE_CLIENT
