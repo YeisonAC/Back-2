@@ -24,18 +24,36 @@ except ImportError:  # ejecución directa dentro del directorio
 
 # Integración Supabase (import compatible)
 try:
-    from .supabase_client import log_interaction
+    from .supabase_client import log_interaction, get_api_usage_count, increment_api_usage, touch_api_key_last_used
 except ImportError:
-    from supabase_client import log_interaction
+    from supabase_client import log_interaction, get_api_usage_count, increment_api_usage, touch_api_key_last_used
 
 # ML1 (Multi Layer) pipeline
 # Nota: evitamos importar en tiempo de módulo para no requerir dependencias pesadas (p.ej., dspy-ai) en Vercel.
 # Hacemos import perezoso dentro de la rama ML1.
 # Gestor de API Keys (import compatible)
 try:
-    from .api_keys import create_api_key, verify_api_key, revoke_api_key, parse_full_key
+    from .api_keys import (
+        create_api_key,
+        verify_api_key,
+        revoke_api_key,
+        parse_full_key,
+        get_api_key_rate_limit,
+        update_api_key,
+        delete_api_key,
+        list_api_keys,
+    )
 except ImportError:
-    from api_keys import create_api_key, verify_api_key, revoke_api_key, parse_full_key
+    from api_keys import (
+        create_api_key,
+        verify_api_key,
+        revoke_api_key,
+        parse_full_key,
+        get_api_key_rate_limit,
+        update_api_key,
+        delete_api_key,
+        list_api_keys,
+    )
 
 # Cargar variables de entorno desde el .env en este mismo directorio
 load_dotenv(dotenv_path=Path(__file__).with_name('.env'))
@@ -461,6 +479,79 @@ async def require_api_key(request: Request, call_next):
     # API Key válida
     return await call_next(request)
 
+# Middleware de rate limiting por API Key (mensual)
+@app.middleware("http")
+async def rate_limit_by_api_key(request: Request, call_next):
+    # Aplicar solo a rutas protegidas (mismas condiciones que auth)
+    if (
+        request.url.path in EXEMPT_PATHS
+        or request.url.path.startswith("/admin")
+        or request.url.path.startswith("/playground")
+    ):
+        return await call_next(request)
+
+    key_id = getattr(request.state, "api_key_id", None)
+    # Si la request se autenticó por ALLOWED_API_KEYS (sin key_id), no podemos aplicar cuota por plan
+    if not key_id:
+        return await call_next(request)
+
+    try:
+        # Obtener límite del plan asociado a la API key
+        rate_limit = get_api_key_rate_limit(key_id)
+    except Exception:
+        rate_limit = None
+
+    # Si no hay límite definido, continuar
+    if not rate_limit or rate_limit <= 0:
+        # Aun así, tocar last_used_at
+        try:
+            touch_api_key_last_used(key_id)
+        except Exception:
+            pass
+        return await call_next(request)
+
+    # Consultar consumo del período actual
+    try:
+        current_count = get_api_usage_count(key_id)
+        if current_count is None:
+            current_count = 0
+    except Exception:
+        current_count = 0
+
+    if current_count >= rate_limit:
+        detail = "API rate limit exceeded"
+        try:
+            log_interaction(
+                endpoint=request.url.path,
+                request_payload={},
+                response_payload={"error": detail},
+                status="blocked",
+                user_ip=get_client_ip(request),
+                layer=_normalize_tier_name(request.headers.get("X-Layer") or request.query_params.get("layer")),
+                blocked_status="blocked",
+                reason="rate_limit_exceeded",
+                api_key_id=key_id,
+            )
+        except Exception:
+            pass
+        try:
+            touch_api_key_last_used(key_id)
+        except Exception:
+            pass
+        return JSONResponse(status_code=429, content={"error": detail})
+
+    # Incrementar consumo y actualizar last_used_at antes de continuar
+    try:
+        increment_api_usage(key_id)
+    except Exception:
+        pass
+    try:
+        touch_api_key_last_used(key_id)
+    except Exception:
+        pass
+
+    return await call_next(request)
+
 # Middleware para capturar IP del cliente y anexarla a la respuesta
 @app.middleware("http")
 async def add_client_ip(request: Request, call_next):
@@ -493,6 +584,12 @@ def _playground_allow_ip(ip: str) -> bool:
 class CreateKeyRequest(BaseModel):
     name: str
     rate_limit: Optional[int] = None
+    user_id: Optional[str] = None
+
+
+class UpdateKeyRequest(BaseModel):
+    name: Optional[str] = None
+    is_active: Optional[bool] = None
 
 
 def _is_admin(request: Request) -> bool:
@@ -512,11 +609,28 @@ def _is_admin(request: Request) -> bool:
 async def admin_create_api_key(request: Request, body: CreateKeyRequest):
     if not _is_admin(request):
         raise HTTPException(status_code=403, detail="Forbidden: admin key required")
-    full = create_api_key(name=body.name, rate_limit=body.rate_limit, created_by="admin")
+    # Prefer body.user_id; fallback al header X-User-Id
+    owner_uid = body.user_id or request.headers.get("X-User-Id") or request.headers.get("x-user-id")
+    full = create_api_key(
+        name=body.name,
+        rate_limit=body.rate_limit,
+        created_by="admin",
+        owner_user_id=owner_uid,
+    )
     if not full:
         raise HTTPException(status_code=500, detail="Failed to create API key")
     key_id, _secret = parse_full_key(full)
     return {"key_id": key_id, "api_key": full}
+
+
+@app.get("/admin/api-keys")
+async def admin_list_api_keys(request: Request, limit: int = 100, offset: int = 0, user_id: Optional[str] = None):
+    if not _is_admin(request):
+        raise HTTPException(status_code=403, detail="Forbidden: admin key required")
+    # Prefer query user_id; fallback al header X-User-Id
+    owner_uid = user_id or request.headers.get("X-User-Id") or request.headers.get("x-user-id")
+    items = list_api_keys(limit=limit, offset=offset, owner_user_id=owner_uid)
+    return {"items": items, "limit": limit, "offset": offset, "user_id": owner_uid}
 
 
 @app.post("/admin/api-keys/{key_id}/revoke")
@@ -527,6 +641,26 @@ async def admin_revoke_api_key(request: Request, key_id: str):
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to revoke API key")
     return {"key_id": key_id, "revoked": True}
+
+
+@app.patch("/admin/api-keys/{key_id}")
+async def admin_update_api_key(request: Request, key_id: str, body: UpdateKeyRequest):
+    if not _is_admin(request):
+        raise HTTPException(status_code=403, detail="Forbidden: admin key required")
+    ok = update_api_key(key_id, name=body.name, active=body.is_active)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to update API key")
+    return {"key_id": key_id, "updated": True}
+
+
+@app.delete("/admin/api-keys/{key_id}")
+async def admin_delete_api_key(request: Request, key_id: str):
+    if not _is_admin(request):
+        raise HTTPException(status_code=403, detail="Forbidden: admin key required")
+    ok = delete_api_key(key_id)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to delete API key")
+    return {"key_id": key_id, "deleted": True}
 
 
 @app.get("/admin/whoami")

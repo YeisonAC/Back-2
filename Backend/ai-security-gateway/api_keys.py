@@ -67,7 +67,12 @@ def parse_full_key(full_key: str) -> Tuple[Optional[str], Optional[str]]:
     return None, val
 
 
-def create_api_key(name: str, rate_limit: Optional[int] = None, created_by: Optional[str] = None) -> Optional[str]:
+def create_api_key(
+    name: str,
+    rate_limit: Optional[int] = None,
+    created_by: Optional[str] = None,
+    owner_user_id: Optional[str] = None,
+) -> Optional[str]:
     """Crea una API key, guarda hash+salt en Supabase y devuelve la clave completa una sola vez."""
     sb = get_supabase()
     if sb is None:
@@ -87,6 +92,10 @@ def create_api_key(name: str, rate_limit: Optional[int] = None, created_by: Opti
         "rate_limit": rate_limit,
         "created_at": now,
         "created_by": created_by,
+        # Guardar un prefijo seguro (no revela el secreto completo)
+        "prefix": secret[:8],
+        # Propietario de la clave para filtrado por usuario en UI
+        "owner_user_id": owner_user_id,
     }
     sb.table(API_KEYS_TABLE).insert(payload).execute()
     return full_key
@@ -122,3 +131,82 @@ def verify_api_key(full_key: str) -> Tuple[bool, Optional[str]]:
     if hmac.compare_digest(derived, row["hash"]):
         return True, key_id
     return False, key_id
+
+
+def get_api_key_meta(key_id: str) -> Optional[dict]:
+    """Obtiene metadatos de la API key, incluyendo rate_limit y active."""
+    sb = get_supabase()
+    if sb is None:
+        return None
+    try:
+        res = (
+            sb.table(API_KEYS_TABLE)
+            .select("key_id, name, active, rate_limit, created_at, last_used_at")
+            .eq("key_id", key_id)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(res, 'data', None) or []
+        if not rows:
+            return None
+        return rows[0]
+    except Exception:
+        return None
+
+
+def update_api_key(key_id: str, name: Optional[str] = None, active: Optional[bool] = None) -> bool:
+    sb = get_supabase()
+    if sb is None:
+        return False
+    updates = {}
+    if name is not None:
+        updates["name"] = name
+    if active is not None:
+        updates["active"] = bool(active)
+    if not updates:
+        return True
+    try:
+        sb.table(API_KEYS_TABLE).update(updates).eq("key_id", key_id).execute()
+        return True
+    except Exception:
+        return False
+
+
+def list_api_keys(limit: int = 100, offset: int = 0, owner_user_id: Optional[str] = None) -> list[dict]:
+    sb = get_supabase()
+    if sb is None:
+        return []
+    try:
+        q = (
+            sb.table(API_KEYS_TABLE)
+            .select("key_id, name, active, rate_limit, created_at, last_used_at, prefix, owner_user_id")
+            .order("created_at", desc=True)
+        )
+        if owner_user_id:
+            q = q.eq("owner_user_id", owner_user_id)
+        res = q.range(offset, offset + max(0, limit - 1)).execute()
+        return getattr(res, 'data', None) or []
+    except Exception:
+        return []
+
+
+def delete_api_key(key_id: str) -> bool:
+    sb = get_supabase()
+    if sb is None:
+        return False
+    try:
+        sb.table(API_KEYS_TABLE).delete().eq("key_id", key_id).execute()
+        return True
+    except Exception:
+        return False
+
+
+def get_api_key_rate_limit(key_id: str) -> Optional[int]:
+    meta = get_api_key_meta(key_id)
+    if not meta:
+        return None
+    rl = meta.get("rate_limit")
+    try:
+        return int(rl) if rl is not None else None
+    except Exception:
+        return None
