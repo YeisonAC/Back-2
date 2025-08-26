@@ -402,25 +402,6 @@ async def require_api_key(request: Request, call_next):
         or request.url.path.startswith("/playground")
     ):
         return await call_next(request)
-    # Si no hay claves configuradas, bloquear todo excepto exentos
-    if not ALLOWED_API_KEYS:
-        # Opcionalmente podríamos permitir si estamos en desarrollo, pero por seguridad: bloquear
-        detail = "API Key authentication not configured"
-        try:
-            log_interaction(
-                endpoint=request.url.path,
-                request_payload={},
-                response_payload={"error": detail},
-                status="blocked",
-                user_ip=get_client_ip(request),
-                layer=_normalize_tier_name(request.headers.get("X-Layer") or request.query_params.get("layer")),
-                blocked_status="blocked",
-                reason="no_keys_configured",
-                api_key_id=getattr(request.state, "api_key_id", None),
-            )
-        except Exception:
-            pass
-        return JSONResponse(status_code=401, content={"error": detail})
 
     key = _extract_api_key(request)
     if not key:
