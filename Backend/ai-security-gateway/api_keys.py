@@ -141,7 +141,7 @@ def get_api_key_meta(key_id: str) -> Optional[dict]:
     try:
         res = (
             sb.table(API_KEYS_TABLE)
-            .select("key_id, name, active, rate_limit, created_at, last_used_at")
+            .select("key_id, name, active, rate_limit, created_at, last_used_at, owner_user_id")
             .eq("key_id", key_id)
             .limit(1)
             .execute()

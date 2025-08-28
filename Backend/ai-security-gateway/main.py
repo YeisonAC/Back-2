@@ -42,6 +42,7 @@ try:
         update_api_key,
         delete_api_key,
         list_api_keys,
+        get_api_key_meta,
     )
 except ImportError:
     from api_keys import (
@@ -53,6 +54,7 @@ except ImportError:
         update_api_key,
         delete_api_key,
         list_api_keys,
+        get_api_key_meta,
     )
 
 # Cargar variables de entorno desde el .env en este mismo directorio
@@ -655,6 +657,69 @@ async def admin_whoami(request: Request):
         "admin_env_configured": bool(EONS_ADMIN_KEY),
         "is_admin": is_admin,
     }
+
+# -------- User-scoped management: cada usuario gestiona sus propias keys --------
+class MgmtCreateKeyRequest(BaseModel):
+    name: str
+    rate_limit: Optional[int] = None
+
+
+class MgmtUpdateKeyRequest(BaseModel):
+    name: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+def _require_user_id(request: Request) -> str:
+    uid = request.headers.get("X-User-Id") or request.headers.get("x-user-id")
+    if not uid:
+        raise HTTPException(status_code=401, detail="Missing X-User-Id header")
+    return uid
+
+
+@app.post("/api/management/keys")
+async def mgmt_create_key(request: Request, body: MgmtCreateKeyRequest):
+    user_id = _require_user_id(request)
+    full = create_api_key(
+        name=body.name,
+        rate_limit=body.rate_limit,
+        created_by=user_id,
+        owner_user_id=user_id,
+    )
+    if not full:
+        raise HTTPException(status_code=500, detail="Failed to create API key")
+    key_id, _secret = parse_full_key(full)
+    return {"key_id": key_id, "api_key": full}
+
+
+@app.get("/api/management/keys")
+async def mgmt_list_keys(request: Request, limit: int = 100, offset: int = 0):
+    user_id = _require_user_id(request)
+    items = list_api_keys(limit=limit, offset=offset, owner_user_id=user_id)
+    return {"items": items, "limit": limit, "offset": offset}
+
+
+@app.patch("/api/management/keys/{key_id}")
+async def mgmt_update_key(request: Request, key_id: str, body: MgmtUpdateKeyRequest):
+    user_id = _require_user_id(request)
+    meta = get_api_key_meta(key_id)
+    if not meta or meta.get("owner_user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Forbidden: not owner or not found")
+    ok = update_api_key(key_id, name=body.name, active=body.is_active)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to update API key")
+    return {"key_id": key_id, "updated": True}
+
+
+@app.delete("/api/management/keys/{key_id}")
+async def mgmt_delete_key(request: Request, key_id: str):
+    user_id = _require_user_id(request)
+    meta = get_api_key_meta(key_id)
+    if not meta or meta.get("owner_user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Forbidden: not owner or not found")
+    ok = delete_api_key(key_id)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to delete API key")
+    return {"key_id": key_id, "deleted": True}
 
 # -------- Playground (sin API Key) --------
 @app.post("/playground/chat")
