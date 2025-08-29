@@ -24,9 +24,9 @@ except ImportError:  # ejecución directa dentro del directorio
 
 # Integración Supabase (import compatible)
 try:
-    from .supabase_client import log_interaction, get_api_usage_count, increment_api_usage, touch_api_key_last_used
+    from .supabase_client import log_interaction, get_api_usage_count, increment_api_usage, touch_api_key_last_used, get_supabase, get_api_key_meta
 except ImportError:
-    from supabase_client import log_interaction, get_api_usage_count, increment_api_usage, touch_api_key_last_used
+    from supabase_client import log_interaction, get_api_usage_count, increment_api_usage, touch_api_key_last_used, get_supabase, get_api_key_meta
 
 # ML1 (Multi Layer) pipeline
 # Nota: evitamos importar en tiempo de módulo para no requerir dependencias pesadas (p.ej., dspy-ai) en Vercel.
@@ -1128,6 +1128,211 @@ async def root():
         "endpoints": ["/health", "/v1/chat/completions"],
         "docs": "/docs"
     }
+
+@app.get("/admin/logs/blocked")
+async def admin_get_blocked_logs(
+    request: Request,
+    user_id: Optional[str] = None,
+    api_key_id: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    days: int = 7
+):
+    """Obtiene logs de bloqueos filtrados por usuario o API key."""
+    if not _is_admin(request):
+        raise HTTPException(status_code=403, detail="Forbidden: admin key required")
+    
+    sb = get_supabase()
+    if sb is None:
+        raise HTTPException(status_code=500, detail="Supabase client unavailable")
+    
+    try:
+        # Construir query base
+        query = sb.table("backend_logs").select("*").eq("blocked_status", "blocked")
+        
+        # Filtros opcionales
+        if user_id:
+            query = query.eq("user_ip", user_id)  # Asumiendo que user_ip contiene el user_id
+        if api_key_id:
+            query = query.eq("api_key_id", api_key_id)
+        
+        # Filtro por fecha (últimos N días)
+        from datetime import datetime, timedelta, timezone
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
+        query = query.gte("created_at", cutoff_date.isoformat())
+        
+        # Ordenar por fecha descendente y aplicar paginación
+        query = query.order("created_at", desc=True).range(offset, offset + limit - 1)
+        
+        result = query.execute()
+        logs = result.data if hasattr(result, 'data') else []
+        
+        return {
+            "logs": logs,
+            "total": len(logs),
+            "limit": limit,
+            "offset": offset,
+            "filters": {
+                "user_id": user_id,
+                "api_key_id": api_key_id,
+                "days": days
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving logs: {str(e)}")
+
+
+@app.get("/admin/logs/blocked/summary")
+async def admin_get_blocked_summary(request: Request, days: int = 7):
+    """Obtiene un resumen de bloqueos por usuario y tipo."""
+    if not _is_admin(request):
+        raise HTTPException(status_code=403, detail="Forbidden: admin key required")
+    
+    sb = get_supabase()
+    if sb is None:
+        raise HTTPException(status_code=500, detail="Supabase client unavailable")
+    
+    try:
+        from datetime import datetime, timedelta, timezone
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
+        
+        # Obtener todos los bloqueos del período
+        query = sb.table("backend_logs").select("*").eq("blocked_status", "blocked").gte("created_at", cutoff_date.isoformat())
+        result = query.execute()
+        logs = result.data if hasattr(result, 'data') else []
+        
+        # Procesar datos para el resumen
+        summary = {
+            "total_blocked": len(logs),
+            "by_reason": {},
+            "by_user": {},
+            "by_api_key": {},
+            "by_layer": {},
+            "period_days": days
+        }
+        
+        for log in logs:
+            # Agrupar por razón
+            reason = log.get("reason", "unknown")
+            summary["by_reason"][reason] = summary["by_reason"].get(reason, 0) + 1
+            
+            # Agrupar por usuario
+            user_ip = log.get("user_ip", "unknown")
+            summary["by_user"][user_ip] = summary["by_user"].get(user_ip, 0) + 1
+            
+            # Agrupar por API key
+            api_key_id = log.get("api_key_id", "unknown")
+            summary["by_api_key"][api_key_id] = summary["by_api_key"].get(api_key_id, 0) + 1
+            
+            # Agrupar por layer
+            layer = log.get("layer", "unknown")
+            summary["by_layer"][layer] = summary["by_layer"].get(layer, 0) + 1
+        
+        return summary
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving summary: {str(e)}")
+
+
+@app.get("/api/management/logs/blocked")
+async def user_get_blocked_logs(
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+    days: int = 7
+):
+    """Obtiene logs de bloqueos para el usuario autenticado."""
+    # Verificar API key del usuario
+    api_key = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+    
+    # Obtener información de la API key
+    key_meta = get_api_key_meta(parse_full_key(api_key)[0])
+    if not key_meta:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    user_id = key_meta.get("owner_user_id")
+    if not user_id:
+        raise HTTPException(status_code=403, detail="API key not associated with user")
+    
+    sb = get_supabase()
+    if sb is None:
+        raise HTTPException(status_code=500, detail="Supabase client unavailable")
+    
+    try:
+        from datetime import datetime, timedelta, timezone
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
+        
+        # Obtener bloqueos para este usuario
+        query = sb.table("backend_logs").select("*").eq("blocked_status", "blocked").eq("user_ip", user_id).gte("created_at", cutoff_date.isoformat())
+        query = query.order("created_at", desc=True).range(offset, offset + limit - 1)
+        
+        result = query.execute()
+        logs = result.data if hasattr(result, 'data') else []
+        
+        return {
+            "logs": logs,
+            "total": len(logs),
+            "limit": limit,
+            "offset": offset,
+            "user_id": user_id,
+            "period_days": days
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving logs: {str(e)}")
+
+
+@app.get("/api/management/logs/blocked/summary")
+async def user_get_blocked_summary(request: Request, days: int = 7):
+    """Obtiene un resumen de bloqueos para el usuario autenticado."""
+    # Verificar API key del usuario
+    api_key = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+    
+    # Obtener información de la API key
+    key_meta = get_api_key_meta(parse_full_key(api_key)[0])
+    if not key_meta:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    user_id = key_meta.get("owner_user_id")
+    if not user_id:
+        raise HTTPException(status_code=403, detail="API key not associated with user")
+    
+    sb = get_supabase()
+    if sb is None:
+        raise HTTPException(status_code=500, detail="Supabase client unavailable")
+    
+    try:
+        from datetime import datetime, timedelta, timezone
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
+        
+        # Obtener bloqueos para este usuario
+        query = sb.table("backend_logs").select("*").eq("blocked_status", "blocked").eq("user_ip", user_id).gte("created_at", cutoff_date.isoformat())
+        result = query.execute()
+        logs = result.data if hasattr(result, 'data') else []
+        
+        # Procesar datos para el resumen
+        summary = {
+            "total_blocked": len(logs),
+            "by_reason": {},
+            "by_layer": {},
+            "period_days": days,
+            "user_id": user_id
+        }
+        
+        for log in logs:
+            # Agrupar por razón
+            reason = log.get("reason", "unknown")
+            summary["by_reason"][reason] = summary["by_reason"].get(reason, 0) + 1
+            
+            # Agrupar por layer
+            layer = log.get("layer", "unknown")
+            summary["by_layer"][layer] = summary["by_layer"].get(layer, 0) + 1
+        
+        return summary
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving summary: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
