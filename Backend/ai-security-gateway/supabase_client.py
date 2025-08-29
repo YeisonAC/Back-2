@@ -174,20 +174,40 @@ def get_api_usage_count(key_id: str, period_key: Optional[str] = None) -> Option
         return None
 
 
-def touch_api_key_last_used(key_id: Optional[str]) -> None:
+def touch_api_key_last_used(key_id: Optional[str]):
     """Actualiza last_used_at de la API key. Silencioso si no hay Supabase o key_id es None."""
     if not key_id:
         return
     sb = get_supabase()
-    if sb is None:
+    if not sb:
         return
     try:
-        sb.table(API_KEYS_TABLE).update({
-            "last_used_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("key_id", key_id).execute()
-        if _DEBUG:
-            print("[SUPABASE] touch_api_key_last_used: ok")
+        sb.table(API_KEYS_TABLE).update({"last_used_at": datetime.now(timezone.utc).isoformat()})\
+            .eq("key_id", key_id).execute()
     except Exception as e:
         if _DEBUG:
-            print(f"[SUPABASE] touch_api_key_last_used failed: {e}")
-        return
+            print(f"[SUPABASE] Error updating last_used_at for key {key_id}: {e}")
+
+
+def get_api_key_meta(key_id: str) -> Optional[dict]:
+    """Obtiene los metadatos de una API key.
+    
+    Args:
+        key_id: ID de la API key a consultar
+        
+    Returns:
+        dict con los metadatos de la key o None si no se encuentra o hay error
+    """
+    sb = get_supabase()
+    if not sb:
+        return None
+        
+    try:
+        res = sb.table(API_KEYS_TABLE).select("*").eq("key_id", key_id).limit(1).execute()
+        if res.data and len(res.data) > 0:
+            return res.data[0]
+        return None
+    except Exception as e:
+        if _DEBUG:
+            print(f"[SUPABASE] Error getting API key meta for {key_id}: {e}")
+        return None

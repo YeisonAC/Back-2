@@ -16,46 +16,32 @@ try:
 except Exception:
     CORSMiddleware = None  # type: ignore
 
-# Integración del Firewall (import compatible según modo de ejecución)
-try:
-    from .ai_firewall import AIFirewall
-except ImportError:  # ejecución directa dentro del directorio
-    from ai_firewall import AIFirewall
-
-# Integración Supabase (import compatible)
-try:
-    from .supabase_client import log_interaction, get_api_usage_count, increment_api_usage, touch_api_key_last_used, get_supabase, get_api_key_meta
-except ImportError:
-    from supabase_client import log_interaction, get_api_usage_count, increment_api_usage, touch_api_key_last_used, get_supabase, get_api_key_meta
+# Importaciones absolutas para funcionar tanto localmente como en Vercel
+from ai_firewall import AIFirewall
+from supabase_client import (
+    log_interaction, 
+    get_api_usage_count, 
+    increment_api_usage, 
+    touch_api_key_last_used, 
+    get_supabase, 
+    get_api_key_meta
+)
 
 # ML1 (Multi Layer) pipeline
 # Nota: evitamos importar en tiempo de módulo para no requerir dependencias pesadas (p.ej., dspy-ai) en Vercel.
 # Hacemos import perezoso dentro de la rama ML1.
-# Gestor de API Keys (import compatible)
-try:
-    from .api_keys import (
-        create_api_key,
-        verify_api_key,
-        revoke_api_key,
-        parse_full_key,
-        get_api_key_rate_limit,
-        update_api_key,
-        delete_api_key,
-        list_api_keys,
-        get_api_key_meta,
-    )
-except ImportError:
-    from api_keys import (
-        create_api_key,
-        verify_api_key,
-        revoke_api_key,
-        parse_full_key,
-        get_api_key_rate_limit,
-        update_api_key,
-        delete_api_key,
-        list_api_keys,
-        get_api_key_meta,
-    )
+# Gestor de API Keys
+from api_keys import (
+    create_api_key,
+    verify_api_key,
+    revoke_api_key,
+    parse_full_key,
+    get_api_key_rate_limit,
+    update_api_key,
+    delete_api_key,
+    list_api_keys,
+    get_api_key_meta,
+)
 
 # Cargar variables de entorno desde el .env en este mismo directorio
 load_dotenv(dotenv_path=Path(__file__).with_name('.env'))
