@@ -65,42 +65,78 @@ def log_interaction(
     table: str = "backend_logs",
     blocked_status: Optional[str] = None,
     reason: Optional[str] = None,
-    # Nuevos campos para seguimiento por API key y uso
     api_key_id: Optional[str] = None,
     prompt_tokens: Optional[int] = None,
     completion_tokens: Optional[int] = None,
     total_tokens: Optional[int] = None,
 ) -> None:
+    """Registra una interacción en Supabase.
+
+    Args:
+        endpoint: Ruta del endpoint (ej: /v1/chat/completions)
+        request_payload: Payload de la solicitud (puede ser un dict o string JSON)
+        response_payload: Payload de la respuesta (puede ser un dict o string JSON)
+        status: Estado de la solicitud (ej: "success", "blocked", "error")
+        user_ip: IP del usuario (opcional)
+        layer: Capa de seguridad (ej: "firewall", "gateway")
+        table: Nombre de la tabla en Supabase (default: 'backend_logs')
+        blocked_status: Estado de bloqueo (opcional)
+        reason: Razón del bloqueo (opcional)
+        api_key_id: ID de la API key utilizada (opcional)
+        prompt_tokens: Tokens de prompt utilizados (opcional)
+        completion_tokens: Tokens de completado utilizados (opcional)
+        total_tokens: Total de tokens utilizados (opcional)
+    """
     sb = get_supabase()
-    if sb is None:
-        if _DEBUG:
-            print("[SUPABASE] log_interaction: Supabase client unavailable; skipping insert")
+    if not sb:
+        print(f"[WARNING] No Supabase client available to log interaction to {endpoint}")
         return
+
     try:
-        payload = {
-            "layer": layer,
+        # Asegurarse de que los payloads sean serializables
+        if not isinstance(request_payload, (str, bytes)):
+            try:
+                request_payload = json.dumps(request_payload, ensure_ascii=False)
+            except (TypeError, ValueError):
+                request_payload = str(request_payload)
+
+        if not isinstance(response_payload, (str, bytes)):
+            try:
+                response_payload = json.dumps(response_payload, ensure_ascii=False)
+            except (TypeError, ValueError):
+                response_payload = str(response_payload)
+
+        # Limitar el tamaño de los payloads para evitar errores de base de datos
+        max_length = 5000  # Ajusta según las limitaciones de tu base de datos
+        if isinstance(request_payload, str) and len(request_payload) > max_length:
+            request_payload = request_payload[:max_length] + "... [TRUNCATED]"
+        if isinstance(response_payload, str) and len(response_payload) > max_length:
+            response_payload = response_payload[:max_length] + "... [TRUNCATED]"
+
+        log_data = {
             "endpoint": endpoint,
-            "status": status,
-            "user_ip": user_ip,
             "request_payload": request_payload,
             "response_payload": response_payload,
+            "status": status,
+            "user_ip": user_ip,
+            "layer": layer,
+            "blocked_status": blocked_status,
+            "reason": reason,
+            "api_key_id": api_key_id,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "created_at": datetime.now(timezone.utc).isoformat()
         }
-        # Campos nuevos opcionales
-        if blocked_status is not None:
-            payload["blocked_status"] = blocked_status
-        if reason is not None:
-            payload["reason"] = reason
-        if api_key_id is not None:
-            payload["api_key_id"] = api_key_id
-        # Token usage (si está disponible)
-        if prompt_tokens is not None:
-            payload["prompt_tokens"] = prompt_tokens
-        if completion_tokens is not None:
-            payload["completion_tokens"] = completion_tokens
-        if total_tokens is not None:
-            payload["total_tokens"] = total_tokens
+        
+        # Filtrar valores None para evitar errores de inserción
+        log_data = {k: v for k, v in log_data.items() if v is not None}
 
-        sb.table(table).insert(payload).execute()
+        # Insertar en Supabase
+        result = sb.table(table).insert(log_data).execute()
+        
+        if hasattr(result, 'error') and result.error:
+            print(f"[ERROR] Failed to log interaction to Supabase: {result.error}")
         if _DEBUG:
             print("[SUPABASE] log_interaction: insert ok")
     except Exception as e:

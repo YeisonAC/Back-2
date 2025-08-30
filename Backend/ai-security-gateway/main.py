@@ -353,14 +353,23 @@ class ChatCompletionRequest(BaseModel):
 # Instancia de FastAPI
 app = FastAPI()
 
-# Configurar CORS si corresponde
-if PLAYGROUND_ALLOWED_ORIGINS and CORSMiddleware is not None:
+# Configurar CORS
+if CORSMiddleware is not None:
+    # Permitir orígenes del frontend
+    allowed_origins = [
+        "http://localhost:3000",  # Desarrollo local
+        "https://app.eonscs.com",
+        "https://front2testing.vercel.app",  # Reemplaza con tu dominio de producción
+        *(PLAYGROUND_ALLOWED_ORIGINS if PLAYGROUND_ALLOWED_ORIGINS else [])
+    ]
+    
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=PLAYGROUND_ALLOWED_ORIGINS,
+        allow_origins=allowed_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["Content-Disposition"],
     )
 
 # Middleware de autenticación por API Key (antes que otros middlewares)
@@ -1125,33 +1134,148 @@ async def admin_get_blocked_logs(
     days: int = 7
 ):
     """Obtiene logs de bloqueos filtrados por usuario o API key."""
+    print(f"[DEBUG] admin_get_blocked_logs called with user_id={user_id}, api_key_id={api_key_id}, limit={limit}, offset={offset}, days={days}")
+    
     if not _is_admin(request):
+        print("[DEBUG] Admin check failed")
         raise HTTPException(status_code=403, detail="Forbidden: admin key required")
     
     sb = get_supabase()
     if sb is None:
-        raise HTTPException(status_code=500, detail="Supabase client unavailable")
+        error_msg = "Supabase client not initialized. Check environment variables."
+        env_vars = {
+            "SUPABASE_URL": os.environ.get("SUPABASE_URL"),
+            "SUPABASE_KEY": os.environ.get("SUPABASE_KEY"),
+            "SUPABASE_SERVICE_ROLE_KEY": os.environ.get("SUPABASE_SERVICE_ROLE_KEY"),
+            "NEXT_PUBLIC_SUPABASE_URL": os.environ.get("NEXT_PUBLIC_SUPABASE_URL"),
+            "NEXT_PUBLIC_SUPABASE_ANON_KEY": os.environ.get("NEXT_PUBLIC_SUPABASE_ANON_KEY")
+        }
+        
+        print(f"[ERROR] {error_msg}")
+        print("Current environment variables:")
+        for k, v in env_vars.items():
+            print(f"- {k}: {'Set' if v else 'Not set'}")
+            
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "Failed to initialize Supabase client",
+                "details": error_msg,
+                "debug": {
+                    "supabase_initialized": False,
+                    "environment_vars": {k: bool(v) for k, v in env_vars.items()}
+                }
+            }
+        )
+        
+    # Debug: Check if we can list tables
+    try:
+        print("[DEBUG] Testing Supabase connection by listing tables...")
+        tables = sb.table('pg_tables').select('tablename').execute()
+        print(f"[DEBUG] Available tables: {[t['tablename'] for t in tables.data if t.get('tablename')]}")
+    except Exception as e:
+        print(f"[WARNING] Could not list tables: {str(e)}")
+        print("[DEBUG] This might be due to insufficient permissions or RLS policies")
     
     try:
         # Construir query base
-        query = sb.table("backend_logs").select("*").eq("blocked_status", "blocked")
+        print("[DEBUG] Building base query for table 'backend_logs'...")
         
-        # Filtros opcionales
+        # Primero verificar si la tabla existe
+        try:
+            table_check = sb.table('pg_tables').select('tablename').eq('schemaname', 'public').eq('tablename', 'backend_logs').execute()
+            if not table_check.data:
+                return JSONResponse(
+                    status_code=404,
+                    content={
+                        "error": "Table not found",
+                        "details": "The 'backend_logs' table does not exist in the database",
+                        "debug": {
+                            "available_tables": [t['tablename'] for t in sb.table('pg_tables').select('tablename').execute().data if t.get('tablename')]
+                        }
+                    }
+                )
+        except Exception as e:
+            print(f"[WARNING] Could not check table existence: {str(e)}")
+        
+        # Construir la consulta
+        query = sb.table("backend_logs").select("*")
+        
+        # Aplicar filtros
         if user_id:
-            query = query.eq("user_ip", user_id)  # Asumiendo que user_ip contiene el user_id
+            print(f"[DEBUG] Filtering by user_id: {user_id}")
+            query = query.eq("user_ip", user_id)
         if api_key_id:
+            print(f"[DEBUG] Filtering by api_key_id: {api_key_id}")
             query = query.eq("api_key_id", api_key_id)
-        
-        # Filtro por fecha (últimos N días)
+            
+        # Filtrar por fecha (últimos N días)
         from datetime import datetime, timedelta, timezone
         cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
-        query = query.gte("created_at", cutoff_date.isoformat())
+        cutoff_iso = cutoff_date.isoformat()
+        print(f"[DEBUG] Filtering logs since: {cutoff_iso}")
+        query = query.gte("created_at", cutoff_iso)
         
-        # Ordenar por fecha descendente y aplicar paginación
+        # Ordenar por fecha descendente y paginar
+        print(f"[DEBUG] Applying ordering and pagination (limit={limit}, offset={offset})")
         query = query.order("created_at", desc=True).range(offset, offset + limit - 1)
         
-        result = query.execute()
-        logs = result.data if hasattr(result, 'data') else []
+        print("[DEBUG] Executing query...")
+        try:
+            # Debug: Imprimir la URL de la consulta (si está disponible)
+            if hasattr(query, 'url'):
+                print(f"[DEBUG] Query URL: {query.url}")
+                
+            result = query.execute()
+            
+            if not hasattr(result, 'data'):
+                print("[WARNING] Query result has no 'data' attribute")
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "error": "Failed to fetch logs",
+                        "details": "Query result has no 'data' attribute",
+                        "debug": {
+                            "query_url": getattr(query, 'url', 'N/A'),
+                            "result_attributes": dir(result),
+                            "supabase_initialized": sb is not None,
+                            "table_exists": 'backend_logs' in [t.get('tablename') for t in sb.table('pg_tables').select('tablename').execute().data]
+                        }
+                    }
+                )
+                
+            logs = result.data
+            print(f"[DEBUG] Found {len(logs)} logs")
+            
+        except Exception as query_error:
+            error_msg = str(query_error)
+            print(f"[ERROR] Query execution failed: {error_msg}")
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": "Failed to execute query",
+                    "details": error_msg,
+                    "debug": {
+                        "query_url": getattr(query, 'url', 'N/A'),
+                        "error_type": type(query_error).__name__,
+                        "supabase_initialized": sb is not None
+                    }
+                }
+            )
+        
+        # Verificar si hay datos en la tabla
+        if not logs:
+            print("[DEBUG] No logs found. Verifying table exists and has data...")
+            table_check = sb.table("backend_logs").select("id", count='exact').limit(1).execute()
+            total_records = getattr(table_check, 'count', 0)
+            print(f"[DEBUG] Total records in backend_logs table: {total_records}")
+            
+            if total_records > 0:
+                print("[DEBUG] Table has data but no logs match the filters")
+                # Obtener un registro de ejemplo para depuración
+                example = sb.table("backend_logs").select("*").limit(1).execute()
+                if hasattr(example, 'data') and example.data:
+                    print(f"[DEBUG] Example record: {json.dumps(example.data[0], indent=2)}")
         
         return {
             "logs": logs,
@@ -1161,12 +1285,21 @@ async def admin_get_blocked_logs(
             "filters": {
                 "user_id": user_id,
                 "api_key_id": api_key_id,
-                "days": days
+                "days": days,
+                "cutoff_date": cutoff_iso
+            },
+            "debug": {
+                "has_supabase": sb is not None,
+                "table": "backend_logs",
+                "query_filters": {
+                    "user_ip": user_id,
+                    "api_key_id": api_key_id,
+                    "created_at_gte": cutoff_iso
+                }
             }
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error retrieving logs: {str(e)}")
-
 
 @app.get("/admin/logs/blocked/summary")
 async def admin_get_blocked_summary(request: Request, days: int = 7):
