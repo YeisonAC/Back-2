@@ -1198,10 +1198,14 @@ async def admin_get_blocked_logs(
         except Exception as e:
             print(f"[WARNING] Could not check table existence: {str(e)}")
         
-        # Construir la consulta
+        # Construir la consulta para logs bloqueados
         query = sb.table("backend_logs").select("*")
         
-        # Aplicar filtros
+        # Filtrar solo logs bloqueados
+        query = query.eq("blocked_status", "blocked")
+        print("[DEBUG] Filtering for blocked logs only (blocked_status = 'blocked')")
+        
+        # Aplicar filtros adicionales
         if user_id:
             print(f"[DEBUG] Filtering by user_id: {user_id}")
             query = query.eq("user_ip", user_id)
@@ -1220,11 +1224,26 @@ async def admin_get_blocked_logs(
         print(f"[DEBUG] Applying ordering and pagination (limit={limit}, offset={offset})")
         query = query.order("created_at", desc=True).range(offset, offset + limit - 1)
         
+        # Debug: Verificar la estructura de la tabla
+        try:
+            print("[DEBUG] Verifying table structure...")
+            columns = sb.rpc('get_table_columns', {'table_name': 'backend_logs'}).execute()
+            print(f"[DEBUG] Table columns: {columns.data}")
+        except Exception as e:
+            print(f"[WARNING] Could not get table structure: {str(e)}")
+        
+        # Debug: Contar registros totales
+        try:
+            count_result = sb.table("backend_logs").select("id", count='exact').execute()
+            print(f"[DEBUG] Total records in backend_logs: {getattr(count_result, 'count', 0)}")
+        except Exception as e:
+            print(f"[WARNING] Could not count records: {str(e)}")
+            
         print("[DEBUG] Executing query...")
         try:
-            # Debug: Imprimir la URL de la consulta (si está disponible)
-            if hasattr(query, 'url'):
-                print(f"[DEBUG] Query URL: {query.url}")
+            # Debug: Imprimir la consulta SQL generada (si es posible)
+            if hasattr(query, 'select'):
+                print(f"[DEBUG] SQL Query: {query.select('*').to_sql()}")
                 
             result = query.execute()
             
@@ -1246,6 +1265,29 @@ async def admin_get_blocked_logs(
                 
             logs = result.data
             print(f"[DEBUG] Found {len(logs)} logs")
+            
+            # Debug: Mostrar algunos registros si se encontraron
+            if logs:
+                print("[DEBUG] Sample log entries:")
+                for i, log in enumerate(logs[:3]):  # Mostrar primeros 3 registros
+                    print(f"[DEBUG] Log {i+1}: {json.dumps(log, indent=2, default=str)}")
+            else:
+                # Si no hay registros, intentar consultar sin filtros
+                print("[DEBUG] No logs found with current filters. Trying without filters...")
+                all_logs = sb.table("backend_logs").select("*").limit(5).execute()
+                if hasattr(all_logs, 'data') and all_logs.data:
+                    print("[DEBUG] Found these records without filters:")
+                    for i, log in enumerate(all_logs.data):
+                        print(f"[DEBUG] Log {i+1}: {json.dumps(log, indent=2, default=str)}")
+                    
+                    # Verificar si los filtros están eliminando todos los registros
+                    print("[DEBUG] Verifying filter conditions...")
+                    if user_id:
+                        user_count = sb.table("backend_logs").select("id", count='exact').eq("user_ip", user_id).execute()
+                        print(f"[DEBUG] Records with user_ip={user_id}: {getattr(user_count, 'count', 0)}")
+                    if api_key_id:
+                        key_count = sb.table("backend_logs").select("id", count='exact').eq("api_key_id", api_key_id).execute()
+                        print(f"[DEBUG] Records with api_key_id={api_key_id}: {getattr(key_count, 'count', 0)}")
             
         except Exception as query_error:
             error_msg = str(query_error)
