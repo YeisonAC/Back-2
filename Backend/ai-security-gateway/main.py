@@ -399,11 +399,24 @@ class LogsResponse(BaseModel):
     page_size: int
 
 # Función para obtener el user_id del token de autenticación
-def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
-    # Aquí implementarías la lógica para validar el token JWT
-    # y extraer el user_id. Por ahora, usaremos el token como user_id
-    # para simplificar el ejemplo.
-    return credentials.credentials  # En producción, extraer el user_id del token JWT
+async def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+    """
+    Extrae y valida el user_id del token JWT.
+    En producción, deberías validar el token con tu proveedor de autenticación.
+    """
+    try:
+        # En producción, validar el token JWT aquí
+        # Ejemplo: decoded_token = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=["HS256"])
+        # return decoded_token.get("sub")  # o el campo que contenga el user_id
+        
+        # Por ahora, asumimos que el token es el user_id (solo para desarrollo)
+        return credentials.credentials
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 # Endpoint para obtener logs con filtrado por usuario
 @app.get("/api/logs", response_model=LogsResponse)
@@ -417,6 +430,13 @@ async def get_logs(
     endpoint: Optional[str] = None,
     current_user_id: str = Depends(get_current_user_id),
 ):
+    """
+    Obtiene los logs de las peticiones realizadas por el usuario autenticado.
+    
+    - Filtra por usuario autenticado usando su ID de sesión
+    - No requiere API key para consultar los logs
+    - Muestra solo los logs de las API keys del usuario
+    """
     try:
         sb = get_supabase()
         if not sb:
@@ -425,15 +445,36 @@ async def get_logs(
                 detail="Error de conexión con la base de datos"
             )
         
-        # Calcular offset para la paginación
+        # Validar parámetros de paginación
+        page = max(1, page)
+        page_size = max(1, min(100, page_size))  # Limitar a 100 registros por página
         offset = (page - 1) * page_size
         
-        # Construir consulta base
+        # 1. Primero obtenemos las API keys del usuario
+        keys_response = sb.table('api_keys') \
+            .select('id') \
+            .eq('owner_user_id', current_user_id) \
+            .execute()
+        
+        if not keys_response.data:
+            # Usuario no tiene API keys, devolver lista vacía
+            return LogsResponse(
+                data=[],
+                total=0,
+                page=page,
+                page_size=page_size
+            )
+        
+        # 2. Construir consulta de logs filtrada por las API keys del usuario
+        key_ids = [key['id'] for key in keys_response.data]
+        
+        # 3. Construir consulta base con filtros
         query = sb.table('backend_logs') \
             .select('*', count='exact') \
+            .in_('api_key_id', key_ids) \
             .order('created_at', desc=True)
         
-        # Aplicar filtros
+        # Aplicar filtros adicionales
         if status_filter:
             query = query.eq('status', status_filter)
         if endpoint:
@@ -445,45 +486,33 @@ async def get_logs(
             end_date = datetime.fromisoformat(date_to) + timedelta(days=1)
             query = query.lte('created_at', end_date.isoformat())
         
-        # Obtener las claves del usuario
-        keys_response = sb.table('api_keys_public') \
-            .select('key_id') \
-            .eq('owner_user_id', current_user_id) \
-            .execute()
-        
-        if not keys_response.data:
-            return LogsResponse(
-                data=[],
-                total=0,
-                page=page,
-                page_size=page_size
-            )
-        
-        # Filtrar logs por las claves del usuario
-        key_ids = [key['key_id'] for key in keys_response.data]
-        query = query.in_('api_key_id', key_ids)
-        
         # Aplicar paginación
         query = query.range(offset, offset + page_size - 1)
         
         # Ejecutar consulta
-        response = query.execute()
+        result = query.execute()
         
-        # Obtener el total de registros
-        total_count = response.count if hasattr(response, 'count') else len(response.data)
+        if hasattr(result, 'error') and result.error:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error al consultar logs: {result.error}"
+            )
         
+        # 4. Devolver resultados paginados
         return LogsResponse(
-            data=response.data,
-            total=total_count,
+            data=result.data or [],
+            total=result.count or 0,
             page=page,
             page_size=page_size
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logging.error(f"Error al obtener logs: {str(e)}")
+        print(f"Error en get_logs: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al obtener logs: {str(e)}"
+            detail=f"Error interno del servidor"
         )
 
 # Middleware de autenticación por API Key (antes que otros middlewares)
