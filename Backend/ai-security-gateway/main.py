@@ -414,6 +414,7 @@ async def require_api_key(request: Request, call_next):
                 blocked_status="blocked",
                 reason="missing_or_invalid_api_key",
                 api_key_id=getattr(request.state, "api_key_id", None),
+                api_key=key if key else None,
             )
         except Exception:
             pass
@@ -422,14 +423,20 @@ async def require_api_key(request: Request, call_next):
     # 1) Intentar validar contra Supabase (formato EONS_<keyid>.<secret>)
     try:
         ok, key_id = verify_api_key(key)
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] Error verifying API key: {str(e)}")
         ok, key_id = (False, None)
 
     # 2) Fallback a variables de entorno si no pasó verificación
-    if not ok:
-        if ALLOWED_API_KEYS and key in ALLOWED_API_KEYS:
-            ok = True
-            key_id = None
+    if not ok and ALLOWED_API_KEYS and key in ALLOWED_API_KEYS:
+        ok = True
+        key_id = key  # Usar la key completa si es de ALLOWED_API_KEYS
+    
+    # Guardar el key_id en el estado de la solicitud para uso posterior
+    if ok:
+        request.state.api_key = key  # Guardar la key completa
+        if key_id:
+            request.state.api_key_id = key_id  # Guardar solo el ID si está disponible
 
     if not ok:
         detail = "Missing or invalid API key"
@@ -443,6 +450,7 @@ async def require_api_key(request: Request, call_next):
                 layer=_normalize_tier_name(request.headers.get("X-Layer") or request.query_params.get("layer")),
                 blocked_status="blocked",
                 reason="missing_or_invalid_api_key",
+                api_key=key,
             )
         except Exception:
             pass
@@ -830,6 +838,7 @@ async def proxy_chat_completions(request: Request):
                 blocked_status="no blocked",
                 reason=f"validation_error: {str(e)}",
                 api_key_id=getattr(request.state, "api_key_id", None),
+                api_key=getattr(request.state, "api_key", None),
             )
         except Exception:
             pass
@@ -891,6 +900,7 @@ async def proxy_chat_completions(request: Request):
                             "intent": intent,
                             "tier": tier.name,
                             "security_labels": sorted(list(security_labels)),
+                        api_key=getattr(request.state, "api_key", None),
                             "primary_security_label": primary,
                         },
                         status="blocked",
@@ -933,6 +943,7 @@ async def proxy_chat_completions(request: Request):
                     blocked_status="blocked",
                     reason=f"firewall_flags: {', '.join(insp.flags) if insp.flags else 'BLOCK'}",
                     api_key_id=getattr(request.state, "api_key_id", None),
+                    api_key=getattr(request.state, "api_key", None),
                 )
             except Exception:
                 pass
@@ -1034,6 +1045,7 @@ async def proxy_chat_completions(request: Request):
                     blocked_status="no blocked",
                     reason=None,
                     api_key_id=getattr(request.state, "api_key_id", None),
+                    api_key=getattr(request.state, "api_key", None),
                     prompt_tokens=(data.get("usage", {}) or {}).get("prompt_tokens"),
                     completion_tokens=(data.get("usage", {}) or {}).get("completion_tokens"),
                     total_tokens=(data.get("usage", {}) or {}).get("total_tokens"),
@@ -1058,9 +1070,10 @@ async def proxy_chat_completions(request: Request):
                     status="error",
                     user_ip=client_ip,
                     layer=tier.name,
-                     blocked_status="no blocked",
-                     reason=f"groq_api_error: {response.status_code}",
-                     api_key_id=getattr(request.state, "api_key_id", None),
+                    blocked_status="no blocked",
+                    reason=f"groq_api_error: {response.status_code}",
+                    api_key_id=getattr(request.state, "api_key_id", None),
+                    api_key=getattr(request.state, "api_key", None),
                 )
             except Exception:
                 pass
@@ -1087,6 +1100,7 @@ async def proxy_chat_completions(request: Request):
                 blocked_status="no blocked",
                 reason="timeout",
                 api_key_id=getattr(request.state, "api_key_id", None),
+                api_key=getattr(request.state, "api_key", None),
             )
         except Exception:
             pass
@@ -1104,6 +1118,8 @@ async def proxy_chat_completions(request: Request):
                 layer=tier.name,
                 blocked_status="no blocked",
                 reason=f"request_exception: {str(e)}",
+                api_key_id=getattr(request.state, "api_key_id", None),
+                api_key=getattr(request.state, "api_key", None),
             )
         except Exception:
             pass
