@@ -900,7 +900,6 @@ async def proxy_chat_completions(request: Request):
                             "intent": intent,
                             "tier": tier.name,
                             "security_labels": sorted(list(security_labels)),
-                        api_key=getattr(request.state, "api_key", None),
                             "primary_security_label": primary,
                         },
                         status="blocked",
@@ -909,6 +908,7 @@ async def proxy_chat_completions(request: Request):
                         blocked_status="blocked",
                         reason=intent.get("reason") or "intent_classifier_malicious",
                         api_key_id=getattr(request.state, "api_key_id", None),
+                        api_key=getattr(request.state, "api_key", None),
                     )
                 except Exception:
                     pass
