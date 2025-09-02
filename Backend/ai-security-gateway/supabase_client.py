@@ -124,7 +124,6 @@ def log_interaction(
             "blocked_status": blocked_status,
             "reason": reason,
             "api_key_id": api_key_id,
-            "api_key": api_key,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
