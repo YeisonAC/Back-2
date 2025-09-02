@@ -372,6 +372,115 @@ if CORSMiddleware is not None:
         expose_headers=["Content-Disposition"],
     )
 
+# Configuración de seguridad
+security = HTTPBearer()
+
+# Modelo para la respuesta de logs
+class LogEntry(BaseModel):
+    id: str
+    endpoint: str
+    status: str
+    layer: str
+    created_at: str
+    request_payload: Optional[Dict[str, Any]] = None
+    response_payload: Optional[Dict[str, Any]] = None
+    api_key_id: Optional[str] = None
+    user_ip: Optional[str] = None
+
+class LogsResponse(BaseModel):
+    data: List[LogEntry]
+    total: int
+    page: int
+    page_size: int
+
+# Función para obtener el user_id del token de autenticación
+def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+    # Aquí implementarías la lógica para validar el token JWT
+    # y extraer el user_id. Por ahora, usaremos el token como user_id
+    # para simplificar el ejemplo.
+    return credentials.credentials  # En producción, extraer el user_id del token JWT
+
+# Endpoint para obtener logs con filtrado por usuario
+@app.get("/api/logs", response_model=LogsResponse)
+async def get_logs(
+    request: Request,
+    page: int = 1,
+    page_size: int = 20,
+    status_filter: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    endpoint: Optional[str] = None,
+    current_user_id: str = Depends(get_current_user_id),
+):
+    try:
+        sb = get_supabase()
+        if not sb:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Error de conexión con la base de datos"
+            )
+        
+        # Calcular offset para la paginación
+        offset = (page - 1) * page_size
+        
+        # Construir consulta base
+        query = sb.table('backend_logs') \
+            .select('*', count='exact') \
+            .order('created_at', desc=True)
+        
+        # Aplicar filtros
+        if status_filter:
+            query = query.eq('status', status_filter)
+        if endpoint:
+            query = query.ilike('endpoint', f'%{endpoint}%')
+        if date_from:
+            query = query.gte('created_at', date_from)
+        if date_to:
+            # Añadir 1 día a la fecha final para incluir todo el día
+            end_date = datetime.fromisoformat(date_to) + timedelta(days=1)
+            query = query.lte('created_at', end_date.isoformat())
+        
+        # Obtener las claves del usuario
+        keys_response = sb.table('api_keys_public') \
+            .select('key_id') \
+            .eq('owner_user_id', current_user_id) \
+            .execute()
+        
+        if not keys_response.data:
+            return LogsResponse(
+                data=[],
+                total=0,
+                page=page,
+                page_size=page_size
+            )
+        
+        # Filtrar logs por las claves del usuario
+        key_ids = [key['key_id'] for key in keys_response.data]
+        query = query.in_('api_key_id', key_ids)
+        
+        # Aplicar paginación
+        query = query.range(offset, offset + page_size - 1)
+        
+        # Ejecutar consulta
+        response = query.execute()
+        
+        # Obtener el total de registros
+        total_count = response.count if hasattr(response, 'count') else len(response.data)
+        
+        return LogsResponse(
+            data=response.data,
+            total=total_count,
+            page=page,
+            page_size=page_size
+        )
+        
+    except Exception as e:
+        logging.error(f"Error al obtener logs: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al obtener logs: {str(e)}"
+        )
+
 # Middleware de autenticación por API Key (antes que otros middlewares)
 EXEMPT_PATHS = {"/", "/health"}
 
