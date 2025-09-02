@@ -1,8 +1,11 @@
 import os
-from fastapi import FastAPI, Request, HTTPException
+from datetime import datetime, timedelta
+from fastapi import FastAPI, Request, HTTPException, Depends, status
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from typing import List, Optional, Tuple, Set
+from typing import List, Optional, Tuple, Set, Dict, Any
 import requests
 from dotenv import load_dotenv
 from pathlib import Path
@@ -10,6 +13,7 @@ import json
 from dataclasses import dataclass
 import ipaddress
 from collections import defaultdict, deque
+from supabase import create_client, Client as SupabaseClient
 from time import time
 try:
     from fastapi.middleware.cors import CORSMiddleware
@@ -352,6 +356,7 @@ class ChatCompletionRequest(BaseModel):
 
 # Instancia de FastAPI
 app = FastAPI()
+security = HTTPBearer()
 
 # Configurar CORS
 if CORSMiddleware is not None:
