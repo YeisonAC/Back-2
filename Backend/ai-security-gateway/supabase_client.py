@@ -14,27 +14,50 @@ def get_supabase() -> Optional[Client]:
     global _SUPABASE_CLIENT
     if _SUPABASE_CLIENT is not None:
         return _SUPABASE_CLIENT
-    # Permitir múltiples nombres de variables de entorno.
-    # Priorizar SERVICE_ROLE para operaciones administrativas (crear/revocar claves),
-    # luego SUPABASE_KEY genérica; como último recurso, aceptar la anon key pública.
-    url = (
-        os.getenv("SUPABASE_URL")
-        or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
-    )
-    key = (
-        os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-        or os.getenv("SUPABASE_SERVICE_KEY")
-        or os.getenv("SUPABASE_KEY")
-        or os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
-    )
-
+        
+    # Debug: Print all environment variables that start with SUPABASE or NEXT_PUBLIC
+    if _DEBUG:
+        print("[SUPABASE] Available environment variables:")
+        for k, v in os.environ.items():
+            if 'SUPABASE' in k or 'NEXT_PUBLIC' in k:
+                print(f"  {k} = {'[REDACTED]' if 'KEY' in k else v}")
+    
+    # Check URL sources - prioritize NEXT_PUBLIC_SUPABASE_URL
+    url = os.getenv("NEXT_PUBLIC_SUPABASE_URL") or os.getenv("SUPABASE_URL")
+    
+    # Check key sources in order of preference
+    key_sources = [
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "SUPABASE_SERVICE_KEY",
+        "SUPABASE_KEY",
+        "NEXT_PUBLIC_SUPABASE_ANON_KEY"
+    ]
+    
+    key = None
+    used_key_source = None
+    for key_source in key_sources:
+        key = os.getenv(key_source)
+        if key:
+            used_key_source = key_source
+            break
+    
     if not url or not key:
+        error_msg = (
+            "[SUPABASE] Missing required configuration. "
+            f"URL: {'Found' if url else 'Missing'}, "
+            f"Key: {'Found' if key else 'Missing'}"
+        )
         if _DEBUG:
-            print(
-                "[SUPABASE] get_supabase: missing URL or KEY. Tried SUPABASE_URL/NEXT_PUBLIC_SUPABASE_URL "
-                "and SUPABASE_SERVICE_ROLE_KEY/SUPABASE_SERVICE_KEY/SUPABASE_KEY/NEXT_PUBLIC_SUPABASE_ANON_KEY"
-            )
+            print(error_msg)
+            if not url:
+                print("  - Tried: SUPABASE_URL, NEXT_PUBLIC_SUPABASE_URL")
+            if not key:
+                print("  - Tried: " + ", ".join(key_sources))
         return None
+        
+    if _DEBUG:
+        print(f"[SUPABASE] Using URL from: {'SUPABASE_URL' if os.getenv('SUPABASE_URL') else 'NEXT_PUBLIC_SUPABASE_URL'}")
+        print(f"[SUPABASE] Using key from: {used_key_source}")
 
     if _DEBUG:
         key_type = (
@@ -88,27 +111,43 @@ def log_interaction(
         completion_tokens: Tokens de completado utilizados (opcional)
         total_tokens: Total de tokens utilizados (opcional)
     """
+    if _DEBUG:
+        print(f"[SUPABASE] log_interaction: Attempting to log to {table}")
+        print(f"[SUPABASE] Endpoint: {endpoint}, Status: {status}, Layer: {layer}")
+        print(f"[SUPABASE] User IP: {user_ip}, API Key ID: {api_key_id}")
+    
     sb = get_supabase()
     if not sb:
-        print(f"[WARNING] No Supabase client available to log interaction to {endpoint}")
+        error_msg = f"[ERROR] No Supabase client available to log interaction to {endpoint}"
+        print(error_msg)
+        # Also print environment info for debugging
+        print("[DEBUG] Environment variables:")
+        for k, v in os.environ.items():
+            if 'SUPABASE' in k or 'NEXT_PUBLIC' in k:
+                print(f"  {k} = {'[REDACTED]' if 'KEY' in k else v}")
         return
 
     try:
+        if _DEBUG:
+            print("[SUPABASE] Preparing to log interaction...")
+            
         # Asegurarse de que los payloads sean serializables
-        if not isinstance(request_payload, (str, bytes)):
-            try:
+        try:
+            if not isinstance(request_payload, (str, bytes)):
                 request_payload = json.dumps(request_payload, ensure_ascii=False)
-            except (TypeError, ValueError):
-                request_payload = str(request_payload)
+        except Exception as e:
+            print(f"[ERROR] Failed to serialize request_payload: {e}")
+            request_payload = str(request_payload)
 
-        if not isinstance(response_payload, (str, bytes)):
-            try:
+        try:
+            if not isinstance(response_payload, (str, bytes)):
                 response_payload = json.dumps(response_payload, ensure_ascii=False)
-            except (TypeError, ValueError):
-                response_payload = str(response_payload)
+        except Exception as e:
+            print(f"[ERROR] Failed to serialize response_payload: {e}")
+            response_payload = str(response_payload)
 
         # Limitar el tamaño de los payloads para evitar errores de base de datos
-        max_length = 5000  # Ajusta según las limitaciones de tu base de datos
+        max_length = 5000
         if isinstance(request_payload, str) and len(request_payload) > max_length:
             request_payload = request_payload[:max_length] + "... [TRUNCATED]"
         if isinstance(response_payload, str) and len(response_payload) > max_length:
@@ -132,18 +171,38 @@ def log_interaction(
         
         # Filtrar valores None para evitar errores de inserción
         log_data = {k: v for k, v in log_data.items() if v is not None}
+        
+        if _DEBUG:
+            print("[SUPABASE] Prepared log data:")
+            for k, v in log_data.items():
+                print(f"  {k}: {str(v)[:100]}{'...' if len(str(v)) > 100 else ''}")
 
         # Insertar en Supabase
+        if _DEBUG:
+            print("[SUPABASE] Attempting to insert into table:", table)
+            
         result = sb.table(table).insert(log_data).execute()
         
+        # Verificar si hay errores en la respuesta
         if hasattr(result, 'error') and result.error:
-            print(f"[ERROR] Failed to log interaction to Supabase: {result.error}")
-        if _DEBUG:
-            print("[SUPABASE] log_interaction: insert ok")
+            error_msg = f"[ERROR] Failed to log interaction to Supabase: {result.error}"
+            print(error_msg)
+            # Intentar obtener más detalles del error
+            if hasattr(result, 'data') and result.data:
+                print(f"[ERROR] Response data: {result.data}")
+            if hasattr(result, 'status_code'):
+                print(f"[ERROR] Status code: {result.status_code}")
+        else:
+            if _DEBUG:
+                print("[SUPABASE] Successfully logged interaction")
+                if hasattr(result, 'data') and result.data:
+                    print(f"[SUPABASE] Inserted data: {result.data}")
+                
     except Exception as e:
-        if _DEBUG:
-            print(f"[SUPABASE] log_interaction: insert failed: {e}")
-        pass
+        error_msg = f"[ERROR] Exception in log_interaction: {str(e)}"
+        print(error_msg)
+        import traceback
+        print("Traceback:", traceback.format_exc())
 
 
 def _current_period_key() -> str:
