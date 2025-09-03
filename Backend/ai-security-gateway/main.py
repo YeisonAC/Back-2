@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import List, Optional, Tuple, Set, Dict, Any
+from supabase_client import get_supabase
 import requests
 from dotenv import load_dotenv
 from pathlib import Path
@@ -450,14 +451,13 @@ async def get_logs(
         page_size = max(1, min(100, page_size))  # Limitar a 100 registros por página
         offset = (page - 1) * page_size
         
-        # 1. Primero obtenemos las API keys del usuario
+        # 1. Obtener las API keys del usuario
         keys_response = sb.table('api_keys') \
-            .select('id') \
+            .select('key_id') \
             .eq('owner_user_id', current_user_id) \
             .execute()
         
         if not keys_response.data:
-            # Usuario no tiene API keys, devolver lista vacía
             return LogsResponse(
                 data=[],
                 total=0,
@@ -465,8 +465,7 @@ async def get_logs(
                 page_size=page_size
             )
         
-        # 2. Construir consulta de logs filtrada por las API keys del usuario
-        key_ids = [key['id'] for key in keys_response.data]
+        key_ids = [key['key_id'] for key in keys_response.data]
         
         # 3. Construir consulta base con filtros
         query = sb.table('backend_logs') \
@@ -516,7 +515,7 @@ async def get_logs(
         )
 
 # Middleware de autenticación por API Key (antes que otros middlewares)
-EXEMPT_PATHS = {"/", "/health"}
+EXEMPT_PATHS = {"/", "/health", "/api/logs", "/api/test-connection"}
 
 def _extract_api_key(request: Request) -> str | None:
     # 1) Encabezado EONS_API (principal)
@@ -1267,6 +1266,53 @@ async def proxy_chat_completions(request: Request):
         except Exception:
             pass
         raise HTTPException(status_code=502, detail=f"Error connecting to Groq API: {str(e)}")
+
+@app.get("/api/test-connection")
+async def test_connection():
+    """Endpoint para probar la conexión con Supabase y verificar la estructura de las tablas"""
+    try:
+        sb = get_supabase()
+        if not sb:
+            return {"status": "error", "message": "No se pudo conectar a Supabase"}
+        
+        # Obtener la estructura de la tabla api_keys
+        try:
+            # Primero intentamos con el nombre de columna actual
+            keys_result = sb.table('api_keys').select('*').limit(1).execute()
+            
+            # Si llegamos aquí, la consulta fue exitosa
+            sample_key = keys_result.data[0] if keys_result.data else {}
+            
+            # Contar registros
+            count_result = sb.table('api_keys').select('*', count='exact').execute()
+            
+            return {
+                "status": "success",
+                "tables": {
+                    "api_keys": {
+                        "count": count_result.count,
+                        "sample_columns": list(sample_key.keys()) if sample_key else "No hay registros",
+                        "sample_data": sample_key
+                    }
+                },
+                "connection": "Conexión exitosa con Supabase"
+            }
+            
+        except Exception as db_error:
+            # Si hay un error, devolver información detallada
+            return {
+                "status": "db_error",
+                "message": str(db_error),
+                "error_type": type(db_error).__name__,
+                "connection": "Conexión a Supabase exitosa, pero error en consulta"
+            }
+            
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e),
+            "error_type": type(e).__name__
+        }
 
 # Endpoint de salud
 @app.get("/health")
