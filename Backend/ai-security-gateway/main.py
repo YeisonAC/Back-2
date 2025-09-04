@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from typing import List, Optional, Tuple, Set, Dict, Any
+from typing import List, Optional, Tuple, Set, Dict, Any, Union
 from supabase_client import get_supabase
 import requests
 from dotenv import load_dotenv
@@ -388,13 +388,19 @@ class LogEntry(BaseModel):
     status: str
     layer: str
     created_at: str
-    request_payload: Optional[Dict[str, Any]] = None
-    response_payload: Optional[Dict[str, Any]] = None
+    request_payload: Optional[Union[Dict[str, Any], str]] = None
+    response_payload: Optional[Union[Dict[str, Any], str]] = None
     api_key_id: Optional[str] = None
     user_ip: Optional[str] = None
+    
+    class Config:
+        json_encoders = {
+            dict: lambda v: v,  # Deja los diccionarios como están
+            str: lambda v: json.loads(v) if isinstance(v, str) and v.startswith('{') else v
+        }
 
 class LogsResponse(BaseModel):
-    data: List[LogEntry]
+    data: List[Dict[str, Any]]
     total: int
     page: int
     page_size: int
@@ -471,7 +477,9 @@ async def get_logs(
         query = sb.table('backend_logs') \
             .select('*', count='exact') \
             .in_('api_key_id', key_ids) \
-            .order('created_at', desc=True)
+            .order('created_at', desc=True) \
+            .limit(page_size) \
+            .range(offset, offset + page_size - 1)
         
         # Aplicar filtros adicionales
         if status_filter:
@@ -497,9 +505,27 @@ async def get_logs(
                 detail=f"Error al consultar logs: {result.error}"
             )
         
-        # 4. Devolver resultados paginados
+        # 4. Procesar los datos para manejar correctamente los campos JSON
+        processed_data = []
+        for item in result.data or []:
+            # Convertir strings JSON a diccionarios si es necesario
+            if 'request_payload' in item and isinstance(item['request_payload'], str):
+                try:
+                    item['request_payload'] = json.loads(item['request_payload'])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                    
+            if 'response_payload' in item and isinstance(item['response_payload'], str):
+                try:
+                    item['response_payload'] = json.loads(item['response_payload'])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            
+            processed_data.append(item)
+        
+        # 5. Devolver resultados paginados
         return LogsResponse(
-            data=result.data or [],
+            data=processed_data,
             total=result.count or 0,
             page=page,
             page_size=page_size
