@@ -2,7 +2,6 @@ import os
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request, HTTPException, Depends, status
 from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import List, Optional, Tuple, Set, Dict, Any, Union
@@ -17,12 +16,13 @@ from collections import defaultdict, deque
 from supabase import create_client, Client as SupabaseClient
 from time import time
 
-# Intentar importar PyJWT, pero no fallar si no está disponible
+# Intentar importar PyJWT y CORSMiddleware, pero no fallar si no están disponibles
 try:
     import jwt
     JWT_AVAILABLE = True
 except ImportError:
     JWT_AVAILABLE = False
+
 try:
     from fastapi.middleware.cors import CORSMiddleware
 except Exception:
