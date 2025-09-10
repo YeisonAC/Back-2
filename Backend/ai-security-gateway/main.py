@@ -16,7 +16,13 @@ import ipaddress
 from collections import defaultdict, deque
 from supabase import create_client, Client as SupabaseClient
 from time import time
-import jwt
+
+# Intentar importar PyJWT, pero no fallar si no está disponible
+try:
+    import jwt
+    JWT_AVAILABLE = True
+except ImportError:
+    JWT_AVAILABLE = False
 try:
     from fastapi.middleware.cors import CORSMiddleware
 except Exception:
@@ -416,34 +422,71 @@ class LogsResponse(BaseModel):
 async def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
     """
     Extrae y valida el user_id del token JWT.
-    Decodifica el JWT para extraer el user_id del campo 'sub'.
+    Si PyJWT está disponible, decodifica el JWT. Si no, usa un enfoque alternativo.
     """
     try:
-        # Decodificar el JWT sin verificar firma (para desarrollo/producción)
-        # En producción, deberías verificar la firma con la clave secreta
-        decoded_token = jwt.decode(credentials.credentials, options={"verify_signature": False})
-        
-        # Extraer el user_id del campo 'sub' (subject)
-        user_id = decoded_token.get("sub")
-        
-        if not user_id:
-            # Intentar con otros campos comunes
-            user_id = decoded_token.get("user_id") or decoded_token.get("user_metadata", {}).get("sub")
-        
-        if not user_id:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid JWT: missing user_id",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        
-        return user_id
-    except jwt.DecodeError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid JWT format",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        if JWT_AVAILABLE:
+            # Decodificar el JWT usando PyJWT
+            decoded_token = jwt.decode(credentials.credentials, options={"verify_signature": False})
+            
+            # Extraer el user_id del campo 'sub' (subject)
+            user_id = decoded_token.get("sub")
+            
+            if not user_id:
+                # Intentar con otros campos comunes
+                user_id = decoded_token.get("user_id") or decoded_token.get("user_metadata", {}).get("sub")
+            
+            if not user_id:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid JWT: missing user_id",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            
+            return user_id
+        else:
+            # Enfoque alternativo: extraer el payload manualmente
+            # Los JWT tienen el formato: header.payload.signature
+            token_parts = credentials.credentials.split('.')
+            
+            if len(token_parts) != 3:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid JWT format",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            
+            # Decodificar el payload (segunda parte)
+            import base64
+            import json
+            
+            # Añadir padding si es necesario
+            payload_b64 = token_parts[1]
+            padding_needed = len(payload_b64) % 4
+            if padding_needed:
+                payload_b64 += '=' * (4 - padding_needed)
+            
+            # Decodificar base64
+            payload_bytes = base64.b64decode(payload_b64)
+            payload_str = payload_bytes.decode('utf-8')
+            payload = json.loads(payload_str)
+            
+            # Extraer el user_id
+            user_id = payload.get("sub")
+            
+            if not user_id:
+                # Intentar con otros campos comunes
+                user_id = payload.get("user_id") or payload.get("user_metadata", {}).get("sub")
+            
+            if not user_id:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid JWT: missing user_id",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            
+            return user_id
+            
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
