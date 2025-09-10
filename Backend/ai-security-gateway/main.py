@@ -29,25 +29,26 @@ except Exception:
     CORSMiddleware = None  # type: ignore
 
 # Importaciones absolutas para funcionar tanto localmente como en Vercel
-from ai_firewall import AIFirewall
-from supabase_client import (
-    log_interaction, 
-    get_api_usage_count, 
-    increment_api_usage, 
-    touch_api_key_last_used, 
-    get_supabase, 
-    get_api_key_meta
-)
+# TEMPORALMENTE COMENTADAS PARA AISLAR EL ERROR
+# from ai_firewall import AIFirewall
+# from supabase_client import (
+#     log_interaction, 
+#     get_api_usage_count, 
+#     increment_api_usage, 
+#     touch_api_key_last_used, 
+#     get_supabase, 
+#     get_api_key_meta
+# )
 
 # ML1 (Multi Layer) pipeline
 # Nota: evitamos importar en tiempo de módulo para no requerir dependencias pesadas (p.ej., dspy-ai) en Vercel.
 # Hacemos import perezoso dentro de la rama ML1.
 # Gestor de API Keys
-from api_keys import (
-    create_api_key,
-    verify_api_key,
-    revoke_api_key,
-    parse_full_key,
+# from api_keys import (
+#     create_api_key,
+#     verify_api_key,
+#     revoke_api_key,
+#     parse_full_key,
     get_api_key_rate_limit,
     update_api_key,
     delete_api_key,
@@ -56,7 +57,7 @@ from api_keys import (
 )
 
 # Importar módulo de diagnóstico
-from debug_logs import add_debug_endpoint
+# from debug_logs import add_debug_endpoint
 
 # Cargar variables de entorno desde el .env en este mismo directorio
 load_dotenv(dotenv_path=Path(__file__).with_name('.env'))
@@ -514,7 +515,8 @@ async def get_logs(
     - Muestra solo los logs de las API keys del usuario
     """
     try:
-        # 1. Conectar a Supabase
+        # 1. Conectar a Supabase - VERSIÓN MÍNIMA SIN IMPORTACIONES
+        from supabase_client import get_supabase
         sb = get_supabase()
         if not sb:
             raise HTTPException(status_code=500, detail="No se pudo conectar a Supabase")
