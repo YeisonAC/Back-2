@@ -48,6 +48,9 @@ from api_keys import (
     get_api_key_meta,
 )
 
+# Importar módulo de diagnóstico
+from debug_logs import add_debug_endpoint
+
 # Cargar variables de entorno desde el .env en este mismo directorio
 load_dotenv(dotenv_path=Path(__file__).with_name('.env'))
 
@@ -359,6 +362,9 @@ class ChatCompletionRequest(BaseModel):
 app = FastAPI()
 security = HTTPBearer()
 
+# Añadir endpoints de diagnóstico
+add_debug_endpoint(app)
+
 # Configurar CORS
 if CORSMiddleware is not None:
     # Permitir orígenes del frontend
@@ -409,19 +415,40 @@ class LogsResponse(BaseModel):
 async def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
     """
     Extrae y valida el user_id del token JWT.
-    En producción, deberías validar el token con tu proveedor de autenticación.
+    Decodifica el JWT para extraer el user_id del campo 'sub'.
     """
     try:
-        # En producción, validar el token JWT aquí
-        # Ejemplo: decoded_token = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=["HS256"])
-        # return decoded_token.get("sub")  # o el campo que contenga el user_id
+        import jwt
         
-        # Por ahora, asumimos que el token es el user_id (solo para desarrollo)
-        return credentials.credentials
+        # Decodificar el JWT sin verificar firma (para desarrollo/producción)
+        # En producción, deberías verificar la firma con la clave secreta
+        decoded_token = jwt.decode(credentials.credentials, options={"verify_signature": False})
+        
+        # Extraer el user_id del campo 'sub' (subject)
+        user_id = decoded_token.get("sub")
+        
+        if not user_id:
+            # Intentar con otros campos comunes
+            user_id = decoded_token.get("user_id") or decoded_token.get("user_metadata", {}).get("sub")
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid JWT: missing user_id",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        return user_id
+    except jwt.DecodeError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid JWT format",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication credentials",
+            detail=f"Invalid authentication credentials: {str(e)}",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -541,7 +568,7 @@ async def get_logs(
         )
 
 # Middleware de autenticación por API Key (antes que otros middlewares)
-EXEMPT_PATHS = {"/", "/health", "/api/logs", "/api/test-connection"}
+EXEMPT_PATHS = {"/", "/health", "/api/logs", "/api/test-connection", "/api/debug/public-check-tables", "/api/debug/public-check-user"}
 
 def _extract_api_key(request: Request) -> str | None:
     # 1) Encabezado EONS_API (principal)

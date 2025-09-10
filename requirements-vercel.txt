@@ -3,3 +3,4 @@ pydantic
 requests
 python-dotenv
 supabase==2.5.1
+PyJWT>=2.0.0
