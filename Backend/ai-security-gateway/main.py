@@ -9,12 +9,23 @@ from typing import Optional, List
 import http
 from dotenv import load_dotenv
 from pathlib import Path
+from supabase import create_client, Client
 
 # Cargar variables de entorno
 load_dotenv(dotenv_path=Path(__file__).with_name('.env'))
 
+# Configuración de Supabase
+supabase_url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
+supabase_key = os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
+if not supabase_url or not supabase_key:
+    raise ValueError("Supabase URL and Key must be set in environment variables")
+
 # Configuración básica
 app = FastAPI(title="EONS API - Minimal Version", version="1.0.0")
+
+# Función para obtener cliente de Supabase
+def get_supabase() -> Client:
+    return create_client(supabase_url, supabase_key)
 
 # Configuración CORS
 app.add_middleware(
@@ -86,24 +97,51 @@ async def get_logs(
     page_size: int = 20,
     current_user_id: str = Depends(get_current_user_id)
 ):
-    """Endpoint minimal para logs - solo retorna datos de prueba"""
+    """Endpoint para obtener logs con conexión a Supabase"""
     try:
-        # Datos de prueba para verificar que el endpoint funciona
-        test_logs = [
-            {
-                "id": "test-1",
-                "api_key_id": "test-key-1",
-                "endpoint": "/api/test",
-                "status": "success",
-                "created_at": "2025-01-01T00:00:00Z",
-                "request_payload": {"test": "data"},
-                "response_payload": {"result": "ok"}
-            }
-        ]
+        supabase = get_supabase()
+        
+        # Obtener API keys del usuario
+        api_keys_response = supabase.table("api_keys").select("id").eq("user_id", current_user_id).execute()
+        
+        if not api_keys_response.data:
+            return LogsResponse(
+                data=[],
+                total=0,
+                page=page,
+                page_size=page_size
+            )
+        
+        api_key_ids = [key["id"] for key in api_keys_response.data]
+        
+        # Calcular offset para paginación
+        offset = (page - 1) * page_size
+        
+        # Obtener logs
+        logs_response = supabase.table("debug_logs").select(
+            "id, api_key_id, endpoint, status, created_at, request_payload, response_payload"
+        ).in_("api_key_id", api_key_ids).order("created_at", desc=True).range(offset, offset + page_size - 1).execute()
+        
+        # Obtener total de logs
+        count_response = supabase.table("debug_logs").select("id", count="exact").in_("api_key_id", api_key_ids).execute()
+        total_logs = count_response.count if count_response.count else 0
+        
+        # Formatear datos
+        logs_data = []
+        for log in logs_response.data:
+            logs_data.append(LogItem(
+                id=log["id"],
+                api_key_id=log["api_key_id"],
+                endpoint=log["endpoint"],
+                status=log["status"],
+                created_at=log["created_at"],
+                request_payload=log.get("request_payload"),
+                response_payload=log.get("response_payload")
+            ))
         
         return LogsResponse(
-            data=test_logs,
-            total=1,
+            data=logs_data,
+            total=total_logs,
             page=page,
             page_size=page_size
         )
