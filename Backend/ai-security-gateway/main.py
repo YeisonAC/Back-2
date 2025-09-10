@@ -16,6 +16,7 @@ import ipaddress
 from collections import defaultdict, deque
 from supabase import create_client, Client as SupabaseClient
 from time import time
+import jwt
 try:
     from fastapi.middleware.cors import CORSMiddleware
 except Exception:
@@ -418,8 +419,6 @@ async def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depend
     Decodifica el JWT para extraer el user_id del campo 'sub'.
     """
     try:
-        import jwt
-        
         # Decodificar el JWT sin verificar firma (para desarrollo/producción)
         # En producción, deberías verificar la firma con la clave secreta
         decoded_token = jwt.decode(credentials.credentials, options={"verify_signature": False})
