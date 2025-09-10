@@ -17,7 +17,10 @@ load_dotenv(dotenv_path=Path(__file__).with_name('.env'))
 # Configuración de Supabase
 supabase_url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
 supabase_key = os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
+print(f"DEBUG: Supabase URL: {'***' + supabase_url[-20:] if supabase_url else 'NOT SET'}")
+print(f"DEBUG: Supabase Key: {'***' + supabase_key[-10:] if supabase_key else 'NOT SET'}")
 if not supabase_url or not supabase_key:
+    print("DEBUG: ERROR - Supabase URL and Key must be set in environment variables")
     raise ValueError("Supabase URL and Key must be set in environment variables")
 
 # Configuración básica
@@ -99,12 +102,18 @@ async def get_logs(
 ):
     """Endpoint para obtener logs con conexión a Supabase"""
     try:
+        print(f"DEBUG: Iniciando get_logs para user_id: {current_user_id}")
+        
         supabase = get_supabase()
+        print(f"DEBUG: Cliente Supabase creado exitosamente")
         
         # Obtener API keys del usuario
+        print(f"DEBUG: Consultando API keys para user_id: {current_user_id}")
         api_keys_response = supabase.table("api_keys").select("id").eq("user_id", current_user_id).execute()
+        print(f"DEBUG: Respuesta API keys: {api_keys_response}")
         
         if not api_keys_response.data:
+            print(f"DEBUG: No se encontraron API keys para el usuario")
             return LogsResponse(
                 data=[],
                 total=0,
@@ -113,18 +122,24 @@ async def get_logs(
             )
         
         api_key_ids = [key["id"] for key in api_keys_response.data]
+        print(f"DEBUG: API keys encontradas: {api_key_ids}")
         
         # Calcular offset para paginación
         offset = (page - 1) * page_size
+        print(f"DEBUG: Paginación - page: {page}, page_size: {page_size}, offset: {offset}")
         
         # Obtener logs
+        print(f"DEBUG: Consultando logs para API keys: {api_key_ids}")
         logs_response = supabase.table("debug_logs").select(
             "id, api_key_id, endpoint, status, created_at, request_payload, response_payload"
         ).in_("api_key_id", api_key_ids).order("created_at", desc=True).range(offset, offset + page_size - 1).execute()
+        print(f"DEBUG: Respuesta logs: {logs_response}")
         
         # Obtener total de logs
+        print(f"DEBUG: Consultando total de logs")
         count_response = supabase.table("debug_logs").select("id", count="exact").in_("api_key_id", api_key_ids).execute()
         total_logs = count_response.count if count_response.count else 0
+        print(f"DEBUG: Total logs: {total_logs}")
         
         # Formatear datos
         logs_data = []
@@ -139,6 +154,7 @@ async def get_logs(
                 response_payload=log.get("response_payload")
             ))
         
+        print(f"DEBUG: Retornando {len(logs_data)} logs")
         return LogsResponse(
             data=logs_data,
             total=total_logs,
@@ -146,10 +162,13 @@ async def get_logs(
             page_size=page_size
         )
     except Exception as e:
-        print(f"Error en get_logs: {str(e)}")
+        print(f"ERROR en get_logs: {str(e)}")
+        print(f"ERROR Tipo: {type(e).__name__}")
+        import traceback
+        print(f"ERROR Traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=http.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error interno del servidor"
+            detail=f"Error interno del servidor: {str(e)}"
         )
 
 if __name__ == "__main__":
