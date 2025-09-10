@@ -514,88 +514,67 @@ async def get_logs(
     - Muestra solo los logs de las API keys del usuario
     """
     try:
+        # 1. Conectar a Supabase
         sb = get_supabase()
         if not sb:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Error de conexión con la base de datos"
-            )
+            raise HTTPException(status_code=500, detail="No se pudo conectar a Supabase")
         
-        # Validar parámetros de paginación
-        page = max(1, page)
-        page_size = max(1, min(100, page_size))  # Limitar a 100 registros por página
-        offset = (page - 1) * page_size
-        
-        # 1. Obtener las API keys del usuario
+        # 2. Obtener todas las API keys del usuario
         keys_response = sb.table('api_keys') \
             .select('key_id') \
             .eq('owner_user_id', current_user_id) \
             .execute()
         
         if not keys_response.data:
-            return LogsResponse(
-                data=[],
-                total=0,
-                page=page,
-                page_size=page_size
-            )
+            return LogsResponse(data=[], total=0, page=page, page_size=page_size)
         
         key_ids = [key['key_id'] for key in keys_response.data]
         
-        # 3. Construir consulta base con filtros
+        # 3. Construir query para obtener logs
         query = sb.table('backend_logs') \
             .select('*', count='exact') \
             .in_('api_key_id', key_ids) \
-            .order('created_at', desc=True) \
-            .limit(page_size) \
-            .range(offset, offset + page_size - 1)
+            .order('created_at', desc=True)
         
-        # Aplicar filtros adicionales
+        # 4. Aplicar filtros adicionales si se proporcionan
         if status_filter:
             query = query.eq('status', status_filter)
-        if endpoint:
-            query = query.ilike('endpoint', f'%{endpoint}%')
         if date_from:
             query = query.gte('created_at', date_from)
         if date_to:
-            # Añadir 1 día a la fecha final para incluir todo el día
-            end_date = datetime.fromisoformat(date_to) + timedelta(days=1)
-            query = query.lte('created_at', end_date.isoformat())
+            query = query.lte('created_at', date_to)
+        if endpoint:
+            query = query.eq('endpoint', endpoint)
         
-        # Aplicar paginación
-        query = query.range(offset, offset + page_size - 1)
+        # 5. Aplicar paginación
+        offset = (page - 1) * page_size
+        query = query.limit(page_size).range(offset, offset + page_size - 1)
         
-        # Ejecutar consulta
+        # 6. Ejecutar query
         result = query.execute()
         
-        if hasattr(result, 'error') and result.error:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error al consultar logs: {result.error}"
-            )
-        
-        # 4. Procesar los datos para manejar correctamente los campos JSON
+        # 7. Procesar resultados
         processed_data = []
-        for item in result.data or []:
-            # Convertir strings JSON a diccionarios si es necesario
-            if 'request_payload' in item and isinstance(item['request_payload'], str):
-                try:
-                    item['request_payload'] = json.loads(item['request_payload'])
-                except (json.JSONDecodeError, TypeError):
-                    pass
-                    
-            if 'response_payload' in item and isinstance(item['response_payload'], str):
-                try:
-                    item['response_payload'] = json.loads(item['response_payload'])
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            
-            processed_data.append(item)
+        if result.data:
+            for log in result.data:
+                processed_log = dict(log)
+                # Convertir JSON strings a dicts si es necesario
+                if isinstance(processed_log.get('request_payload'), str):
+                    try:
+                        processed_log['request_payload'] = json.loads(processed_log['request_payload'])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                if isinstance(processed_log.get('response_payload'), str):
+                    try:
+                        processed_log['response_payload'] = json.loads(processed_log['response_payload'])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                processed_data.append(processed_log)
         
-        # 5. Devolver resultados paginados
+        # 8. Devolver resultados paginados
         return LogsResponse(
             data=processed_data,
-            total=result.count or 0,
+            total=result.count if hasattr(result, 'count') else len(processed_data),
             page=page,
             page_size=page_size
         )
