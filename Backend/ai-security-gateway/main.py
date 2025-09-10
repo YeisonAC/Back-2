@@ -128,10 +128,10 @@ async def get_logs(
                 supabase = get_supabase()
                 print(f"DEBUG: Cliente Supabase creado exitosamente")
                 
-                # Obtener API keys del usuario
+                # Obtener API keys del usuario desde api_keys_public
                 print(f"DEBUG: Consultando API keys para user_id: {current_user_id}")
                 try:
-                    api_keys_response = supabase.table("api_keys").select("id").eq("user_id", current_user_id).execute()
+                    api_keys_response = supabase.table("api_keys_public").select("api_key").eq("owner_user_id", current_user_id).execute()
                     print(f"DEBUG: Respuesta API keys - Status: {getattr(api_keys_response, 'status_code', 'N/A')}")
                     print(f"DEBUG: Respuesta API keys - Data: {getattr(api_keys_response, 'data', 'N/A')}")
                     print(f"DEBUG: Respuesta API keys - Error: {getattr(api_keys_response, 'error', 'N/A')}")
@@ -140,7 +140,7 @@ async def get_logs(
                     raise
                 
                 if api_keys_response.data:
-                    api_key_ids = [key["id"] for key in api_keys_response.data]
+                    api_key_ids = [key["api_key"] for key in api_keys_response.data]
                     print(f"DEBUG: API keys encontradas: {api_key_ids}")
                     
                     # Intentar obtener logs de la tabla debug_logs si existe
@@ -190,8 +190,8 @@ async def get_logs(
                                 endpoint="/api/test",
                                 status="success",
                                 created_at="2025-01-01T00:00:00Z",
-                                request_payload={"test": "data", "api_key_id": api_key_id},
-                                response_payload={"result": "ok", "api_key_id": api_key_id}
+                                request_payload={"test": "data", "api_key": api_key_id},
+                                response_payload={"result": "ok", "api_key": api_key_id}
                             ))
                         
                         total_logs = len(logs_data)
