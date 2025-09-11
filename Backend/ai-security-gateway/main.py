@@ -225,10 +225,25 @@ async def get_logs(
                 except Exception as e:
                     print(f"DEBUG: Error consultando muestra de tabla '{table_name}': {str(e)}")
         
-        # Si no se encontraron logs, retornar vacío
+        # Si no se encontraron logs, retornar información de depuración
         if not logs_data:
             print(f"DEBUG: No se encontraron logs para el usuario {current_user_id}")
-            return LogsResponse(data=[], total=0, page=page, page_size=page_size)
+            # Retornar información de depuración en la respuesta
+            debug_info = {
+                "user_id": current_user_id,
+                "api_key_ids": api_key_ids,
+                "existing_tables": existing_tables,
+                "message": "No logs found - check debug info"
+            }
+            # Crear una respuesta temporal con información de depuración
+            class DebugResponse(BaseModel):
+                data: List = []
+                total: int = 0
+                page: int = page
+                page_size: int = page_size
+                debug_info: dict = debug_info
+            
+            return DebugResponse()
         
         # Convertir logs a formato LogItem
         log_items = []
