@@ -6,11 +6,17 @@ import json
 import base64
 import ast
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict, Any, Union
 import http
 from dotenv import load_dotenv
 from pathlib import Path
 from supabase import create_client, Client
+
+# Importar funciones de API keys
+try:
+    from .api_keys import create_api_key, list_api_keys, revoke_api_key, update_api_key, delete_api_key, get_api_key_meta
+except ImportError:
+    from api_keys import create_api_key, list_api_keys, revoke_api_key, update_api_key, delete_api_key, get_api_key_meta
 
 # Cargar variables de entorno
 load_dotenv(dotenv_path=Path(__file__).with_name('.env'))
@@ -79,6 +85,43 @@ class LogsResponse(BaseModel):
     page: int
     page_size: int
     debug_info: Optional[dict] = None
+
+# Modelos para API Keys
+class CreateKeyRequest(BaseModel):
+    name: str
+    rate_limit: Optional[int] = None
+    user_id: Optional[str] = None
+
+class UpdateKeyRequest(BaseModel):
+    name: Optional[str] = None
+    is_active: Optional[bool] = None
+
+class MgmtCreateKeyRequest(BaseModel):
+    name: str
+    rate_limit: Optional[int] = None
+
+class MgmtUpdateKeyRequest(BaseModel):
+    name: Optional[str] = None
+    is_active: Optional[bool] = None
+
+class APIKeyResponse(BaseModel):
+    id: str
+    name: str
+    key_id: str
+    full_key: str
+    rate_limit: Optional[int] = None
+    created_at: str
+    is_active: bool = True
+    owner_user_id: Optional[str] = None
+
+class APIKeyMetaResponse(BaseModel):
+    id: str
+    name: str
+    key_id: str
+    rate_limit: Optional[int] = None
+    created_at: str
+    is_active: bool
+    owner_user_id: Optional[str] = None
 
 # Seguridad básica
 security = HTTPBearer()
@@ -426,6 +469,217 @@ async def get_logs(
         print(f"DEBUG: Error consultando Supabase: {str(e)}")
         print(f"DEBUG: Tipo de error: {type(e)}")
         raise HTTPException(status_code=500, detail=f"Error getting logs: {str(e)}")
+
+
+# -------- Admin: Gestión de API Keys --------
+def _is_admin(request: Request) -> bool:
+    """Verifica si la request es de un admin (por ahora, siempre true para desarrollo)"""
+    # En producción, aquí deberías verificar si el usuario tiene rol de admin
+    # Por ahora, permitimos todas las operaciones para desarrollo
+    return True
+
+@app.post("/api/admin/keys", response_model=APIKeyResponse)
+async def admin_create_api_key(request: Request, body: CreateKeyRequest):
+    """Crea una nueva API key (solo admin)"""
+    if not _is_admin(request):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        result = create_api_key(
+            name=body.name,
+            rate_limit=body.rate_limit,
+            owner_user_id=body.user_id
+        )
+        
+        return APIKeyResponse(
+            id=result.get("id", ""),
+            name=result.get("name", ""),
+            key_id=result.get("key_id", ""),
+            full_key=result.get("full_key", ""),
+            rate_limit=result.get("rate_limit"),
+            created_at=result.get("created_at", ""),
+            is_active=result.get("is_active", True),
+            owner_user_id=result.get("owner_user_id")
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating API key: {str(e)}")
+
+@app.get("/api/admin/keys", response_model=List[APIKeyMetaResponse])
+async def admin_list_api_keys(request: Request, limit: int = 100, offset: int = 0, user_id: Optional[str] = None):
+    """Lista todas las API keys (solo admin)"""
+    if not _is_admin(request):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        keys = list_api_keys(limit=limit, offset=offset, owner_user_id=user_id)
+        
+        return [
+            APIKeyMetaResponse(
+                id=key.get("id", ""),
+                name=key.get("name", ""),
+                key_id=key.get("key_id", ""),
+                rate_limit=key.get("rate_limit"),
+                created_at=key.get("created_at", ""),
+                is_active=key.get("is_active", True),
+                owner_user_id=key.get("owner_user_id")
+            ) for key in keys
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing API keys: {str(e)}")
+
+@app.delete("/api/admin/keys/{key_id}")
+async def admin_delete_api_key(request: Request, key_id: str):
+    """Elimina una API key (solo admin)"""
+    if not _is_admin(request):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        delete_api_key(key_id)
+        return {"message": f"API key {key_id} deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting API key: {str(e)}")
+
+@app.put("/api/admin/keys/{key_id}", response_model=APIKeyMetaResponse)
+async def admin_update_api_key(request: Request, key_id: str, body: UpdateKeyRequest):
+    """Actualiza una API key (solo admin)"""
+    if not _is_admin(request):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        update_api_key(key_id, name=body.name, active=body.is_active)
+        
+        # Obtener la key actualizada
+        key_meta = get_api_key_meta(key_id)
+        
+        return APIKeyMetaResponse(
+            id=key_meta.get("id", ""),
+            name=key_meta.get("name", ""),
+            key_id=key_meta.get("key_id", ""),
+            rate_limit=key_meta.get("rate_limit"),
+            created_at=key_meta.get("created_at", ""),
+            is_active=key_meta.get("is_active", True),
+            owner_user_id=key_meta.get("owner_user_id")
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating API key: {str(e)}")
+
+@app.post("/api/admin/keys/{key_id}/revoke")
+async def admin_revoke_api_key(request: Request, key_id: str):
+    """Revoca una API key (solo admin)"""
+    if not _is_admin(request):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        revoke_api_key(key_id)
+        return {"message": f"API key {key_id} revoked successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error revoking API key: {str(e)}")
+
+
+# -------- User-scoped management: cada usuario gestiona sus propias keys --------
+def _require_user_id(request: Request) -> str:
+    """Obtiene el user_id del request (similar a get_current_user_id pero sin JWT)"""
+    # Por ahora, para desarrollo, usamos un header o retornamos un valor por defecto
+    user_id = request.headers.get("X-User-ID")
+    if not user_id:
+        # En producción, esto debería venir del JWT
+        user_id = "dev-user-id"
+    return user_id
+
+@app.post("/api/keys", response_model=APIKeyResponse)
+async def mgmt_create_key(request: Request, body: MgmtCreateKeyRequest):
+    """Crea una nueva API key para el usuario autenticado"""
+    try:
+        user_id = _require_user_id(request)
+        
+        result = create_api_key(
+            name=body.name,
+            rate_limit=body.rate_limit,
+            owner_user_id=user_id
+        )
+        
+        return APIKeyResponse(
+            id=result.get("id", ""),
+            name=result.get("name", ""),
+            key_id=result.get("key_id", ""),
+            full_key=result.get("full_key", ""),
+            rate_limit=result.get("rate_limit"),
+            created_at=result.get("created_at", ""),
+            is_active=result.get("is_active", True),
+            owner_user_id=result.get("owner_user_id")
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating API key: {str(e)}")
+
+@app.get("/api/keys", response_model=List[APIKeyMetaResponse])
+async def mgmt_list_keys(request: Request, limit: int = 100, offset: int = 0):
+    """Lista las API keys del usuario autenticado"""
+    try:
+        user_id = _require_user_id(request)
+        
+        keys = list_api_keys(limit=limit, offset=offset, owner_user_id=user_id)
+        
+        return [
+            APIKeyMetaResponse(
+                id=key.get("id", ""),
+                name=key.get("name", ""),
+                key_id=key.get("key_id", ""),
+                rate_limit=key.get("rate_limit"),
+                created_at=key.get("created_at", ""),
+                is_active=key.get("is_active", True),
+                owner_user_id=key.get("owner_user_id")
+            ) for key in keys
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing API keys: {str(e)}")
+
+@app.put("/api/keys/{key_id}", response_model=APIKeyMetaResponse)
+async def mgmt_update_key(request: Request, key_id: str, body: MgmtUpdateKeyRequest):
+    """Actualiza una API key del usuario autenticado"""
+    try:
+        user_id = _require_user_id(request)
+        
+        # Verificar que la key pertenece al usuario
+        key_meta = get_api_key_meta(key_id)
+        if key_meta.get("owner_user_id") != user_id:
+            raise HTTPException(status_code=403, detail="API key does not belong to user")
+        
+        update_api_key(key_id, name=body.name, active=body.is_active)
+        
+        # Obtener la key actualizada
+        key_meta = get_api_key_meta(key_id)
+        
+        return APIKeyMetaResponse(
+            id=key_meta.get("id", ""),
+            name=key_meta.get("name", ""),
+            key_id=key_meta.get("key_id", ""),
+            rate_limit=key_meta.get("rate_limit"),
+            created_at=key_meta.get("created_at", ""),
+            is_active=key_meta.get("is_active", True),
+            owner_user_id=key_meta.get("owner_user_id")
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating API key: {str(e)}")
+
+@app.delete("/api/keys/{key_id}")
+async def mgmt_delete_key(request: Request, key_id: str):
+    """Elimina una API key del usuario autenticado"""
+    try:
+        user_id = _require_user_id(request)
+        
+        # Verificar que la key pertenece al usuario
+        key_meta = get_api_key_meta(key_id)
+        if key_meta.get("owner_user_id") != user_id:
+            raise HTTPException(status_code=403, detail="API key does not belong to user")
+        
+        delete_api_key(key_id)
+        return {"message": f"API key {key_id} deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting API key: {str(e)}")
 
 
 if __name__ == "__main__":
