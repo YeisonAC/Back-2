@@ -71,6 +71,7 @@ class LogsResponse(BaseModel):
     total: int
     page: int
     page_size: int
+    debug_info: Optional[dict] = None
 
 # Seguridad básica
 security = HTTPBearer()
@@ -150,9 +151,27 @@ async def get_logs(
             print(f"DEBUG: Respuesta api_keys: {api_keys_response}")
         
         api_keys = api_keys_response.data if api_keys_response.data else []
-        api_key_ids = [key["key_id"] for key in api_keys] if api_keys else []
         
-        print(f"DEBUG: API keys encontradas: {len(api_keys)}, IDs: {api_key_ids}")
+        print(f"DEBUG: API keys encontradas: {len(api_keys)}")
+        
+        # Extraer key_id de las API keys (filtrando nulos)
+        api_key_ids = []
+        null_count = 0
+        if api_keys:
+            for i, key in enumerate(api_keys):
+                key_id = key.get("key_id")
+                if key_id and key_id.strip():  # Filtrar nulos y vacíos
+                    api_key_ids.append(str(key_id))
+                else:
+                    null_count += 1
+                    if i < 5:  # Mostrar solo los primeros 5 nulos para depuración
+                        print(f"DEBUG: API key {i} con key_id nulo/vacío: {key}")
+            
+            print(f"DEBUG: Total de API key IDs válidos: {len(api_key_ids)} de {len(api_keys)}")
+            print(f"DEBUG: API keys con key_id nulo/vacío: {null_count}")
+            print(f"DEBUG: Primeros 5 API key IDs válidos: {api_key_ids[:5]}")
+        else:
+            print(f"DEBUG: No se encontraron API keys")
         
         debug_info["api_key_ids"] = api_key_ids
         
@@ -195,23 +214,49 @@ async def get_logs(
         
         # Buscar logs en la tabla backend_logs para las API keys del usuario
         try:
-            logs_response = supabase.table("backend_logs").select("*").in_("api_key_id", api_key_ids).execute()
+            print(f"DEBUG: Ejecutando consulta con {len(api_key_ids)} API key IDs")
+            print(f"DEBUG: API key IDs para consulta: {api_key_ids[:3]}...")  # Mostrar solo primeros 3
+            
+            # Primero, verificar si hay logs en general
+            all_logs_response = supabase.table("backend_logs").select("*").limit(1).execute()
+            print(f"DEBUG: Hay logs en backend_logs: {len(all_logs_response.data) > 0}")
+            
+            if all_logs_response.data:
+                print(f"DEBUG: Estructura de un log existente: {all_logs_response.data[0]}")
+                # Verificar el valor de api_key_id en un log existente
+                existing_api_key_id = all_logs_response.data[0].get("api_key_id")
+                print(f"DEBUG: api_key_id en log existente: {existing_api_key_id}, tipo: {type(existing_api_key_id)}")
+                
+                # Verificar si alguno de nuestros API key IDs coincide
+                if existing_api_key_id in api_key_ids:
+                    print(f"DEBUG: ¡Coincidencia encontrada! El api_key_id {existing_api_key_id} está en nuestra lista")
+                else:
+                    print(f"DEBUG: No hay coincidencia. Nuestros IDs: {api_key_ids[:3]}...")
+            
+            # Ahora hacer la consulta filtrada - excluir nulos en api_key_id
+            logs_response = supabase.table("backend_logs").select("*").in_("api_key_id", api_key_ids).not_.is_("api_key_id", "null").execute()
+            print(f"DEBUG: Respuesta de consulta filtrada (excluyendo nulos): {logs_response}")
+            
             if logs_response.data:
-                logs_data.extend(logs_response.data)
-                print(f"DEBUG: Encontrados {len(logs_response.data)} logs en backend_logs para el usuario")
-                print(f"DEBUG: Estructura del primer log: {logs_response.data[0] if logs_response.data else 'No logs'}")
+                # Filtrar adicionalmente por si acaso hay nulos que pasaron
+                valid_logs = [log for log in logs_response.data if log.get("api_key_id") and log.get("api_key_id").strip()]
+                logs_data.extend(valid_logs)
+                print(f"DEBUG: Encontrados {len(valid_logs)} logs válidos de {len(logs_response.data)} totales en backend_logs")
+                if valid_logs:
+                    print(f"DEBUG: Estructura del primer log válido: {valid_logs[0]}")
             else:
                 print(f"DEBUG: No se encontraron logs en backend_logs para los API key IDs: {api_key_ids}")
-                # Intentar ver logs sin filtro para verificar si hay datos en general
-                try:
-                    all_logs_response = supabase.table("backend_logs").select("*").limit(3).execute()
-                    if all_logs_response.data:
-                        print(f"DEBUG: Muestra de logs en backend_logs (sin filtrar): {all_logs_response.data}")
-                        print(f"DEBUG: Hay datos en backend_logs pero no para este usuario")
-                    else:
-                        print(f"DEBUG: No hay datos en backend_logs")
-                except Exception as e:
-                    print(f"DEBUG: Error consultando muestra de backend_logs: {str(e)}")
+                
+                # Intentar con un solo API key ID para probar
+                if api_key_ids:
+                    test_response = supabase.table("backend_logs").select("*").eq("api_key_id", api_key_ids[0]).not_.is_("api_key_id", "null").execute()
+                    print(f"DEBUG: Prueba con primer API key ID ({api_key_ids[0]}): {len(test_response.data)} logs")
+                    
+                    # Si aún no hay resultados, mostrar logs con api_key_id nulo para comparar
+                    null_logs_response = supabase.table("backend_logs").select("*").is_("api_key_id", "null").limit(3).execute()
+                    if null_logs_response.data:
+                        print(f"DEBUG: Muestra de logs con api_key_id nulo: {len(null_logs_response.data)} registros")
+                        print(f"DEBUG: Estructura de log con api_key_id nulo: {null_logs_response.data[0]}")
         except Exception as e:
             print(f"DEBUG: Error consultando backend_logs: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Error querying backend_logs: {str(e)}")
