@@ -263,12 +263,23 @@ async def get_logs(
         print(f"DEBUG: Retornando {len(paginated_logs)} logs reales para user_id: {current_user_id}")
         print(f"DEBUG: Total logs: {len(log_items)}, Page: {page}, Page size: {page_size}")
         
-        return LogsResponse(
+        # Crear respuesta con información de depuración
+        response = LogsResponse(
             data=paginated_logs,
             total=len(log_items),
             page=page,
             page_size=page_size
         )
+        
+        # Agregar información de depuración como atributo adicional
+        response.debug_info = {
+            "user_id": current_user_id,
+            "api_key_ids": api_key_ids,
+            "table_used": "backend_logs",
+            "message": f"Found {len(log_items)} total logs, returning {len(paginated_logs)}"
+        }
+        
+        return response
         
     except Exception as e:
         print(f"DEBUG: Error consultando Supabase: {str(e)}")
