@@ -228,9 +228,11 @@ async def get_logs(
                 total: int = 0
                 page: int = 1
                 page_size: int = 20
-                debug_info: dict = debug_info
+                debug_info: dict = {}
             
-            return DebugResponse()
+            response = DebugResponse()
+            response.debug_info = debug_info
+            return response
         
         # Convertir logs a formato LogItem
         log_items = []
