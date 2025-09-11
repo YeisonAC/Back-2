@@ -247,30 +247,14 @@ def _normalize_tier_name(tier_name: str) -> str:
     """Normalizar nombre de tier"""
     return tier_name.lower()
 
-def log_interaction(**kwargs):
-    """Registrar interacción en logs"""
-    # Implementación simple - imprimir en consola por ahora
-    print(f"LOG: {kwargs}")
+# Importar la clase AIFirewall real
+try:
+    from .ai_firewall import AIFirewall
+except ImportError:
+    from ai_firewall import AIFirewall
 
-# Clase Firewall simplificada
-class SimpleFirewall:
-    def inspect_request(self, user_id: str, prompt: str, system_purpose: str):
-        class InspectionResult:
-            def __init__(self):
-                self.flags = []
-                self.decision = "ALLOW"
-                self.threat_score = 0
-        return InspectionResult()
-    
-    def inspect_response(self, content: str):
-        class ResponseInspection:
-            def __init__(self):
-                self.flags = []
-                self.redacted_text = content
-        return ResponseInspection()
-
-# Instancia global del firewall
-firewall = SimpleFirewall()
+# Instancia global del firewall real
+firewall = AIFirewall()
 
 # Endpoints básicos
 @app.get("/")
