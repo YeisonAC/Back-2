@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import json
 import base64
+import ast
 from pydantic import BaseModel
 from typing import Optional, List
 import http
@@ -347,24 +348,34 @@ async def get_logs(
                 if isinstance(request_payload, str):
                     print(f"DEBUG: request_payload es string: {request_payload[:100]}...")
                     try:
+                        # Primero intentar con JSON estándar (comillas dobles)
                         request_payload = json.loads(request_payload)
-                        print(f"DEBUG: request_payload convertido exitosamente a dict")
-                    except json.JSONDecodeError as e:
-                        print(f"DEBUG: Error convirtiendo request_payload: {e}")
-                        # Si no es JSON válido, dejar como string o usar dict vacío
-                        request_payload = {}
+                        print(f"DEBUG: request_payload convertido exitosamente con JSON")
+                    except json.JSONDecodeError:
+                        try:
+                            # Si falla, intentar con ast.literal_eval (comillas simples)
+                            request_payload = ast.literal_eval(request_payload)
+                            print(f"DEBUG: request_payload convertido exitosamente con ast.literal_eval")
+                        except (ValueError, SyntaxError) as e:
+                            print(f"DEBUG: Error convirtiendo request_payload con ambos métodos: {e}")
+                            request_payload = {}
                 else:
                     print(f"DEBUG: request_payload no es string, tipo: {type(request_payload)}")
                         
                 if isinstance(response_payload, str):
                     print(f"DEBUG: response_payload es string: {response_payload[:100]}...")
                     try:
+                        # Primero intentar con JSON estándar (comillas dobles)
                         response_payload = json.loads(response_payload)
-                        print(f"DEBUG: response_payload convertido exitosamente a dict")
-                    except json.JSONDecodeError as e:
-                        print(f"DEBUG: Error convirtiendo response_payload: {e}")
-                        # Si no es JSON válido, dejar como string o usar dict vacío
-                        response_payload = {}
+                        print(f"DEBUG: response_payload convertido exitosamente con JSON")
+                    except json.JSONDecodeError:
+                        try:
+                            # Si falla, intentar con ast.literal_eval (comillas simples)
+                            response_payload = ast.literal_eval(response_payload)
+                            print(f"DEBUG: response_payload convertido exitosamente con ast.literal_eval")
+                        except (ValueError, SyntaxError) as e:
+                            print(f"DEBUG: Error convirtiendo response_payload con ambos métodos: {e}")
+                            response_payload = {}
                 else:
                     print(f"DEBUG: response_payload no es string, tipo: {type(response_payload)}")
                 
