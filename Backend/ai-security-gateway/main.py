@@ -129,6 +129,14 @@ async def get_logs(
         # Obtener cliente de Supabase
         supabase = get_supabase()
         
+        # Preparar información de depuración básica
+        debug_info = {
+            "user_id": current_user_id,
+            "api_key_ids": [],
+            "table_used": "backend_logs",
+            "message": "Processing logs request"
+        }
+        
         # Primero obtener las API keys del usuario
         print(f"DEBUG: Buscando API keys para user_id: {current_user_id}")
         
@@ -145,6 +153,8 @@ async def get_logs(
         api_key_ids = [key["key_id"] for key in api_keys] if api_keys else []
         
         print(f"DEBUG: API keys encontradas: {len(api_keys)}, IDs: {api_key_ids}")
+        
+        debug_info["api_key_ids"] = api_key_ids
         
         if not api_key_ids:
             print(f"DEBUG: No se encontraron API keys para el usuario {current_user_id}")
@@ -206,13 +216,8 @@ async def get_logs(
             print(f"DEBUG: Error consultando backend_logs: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Error querying backend_logs: {str(e)}")
         
-        # Preparar información de depuración
-        debug_info = {
-            "user_id": current_user_id,
-            "api_key_ids": api_key_ids,
-            "table_used": "backend_logs",
-            "message": "No logs found - check debug info"
-        }
+        # Actualizar información de depuración
+        debug_info["message"] = "No logs found - check debug info"
         
         # Si no se encontraron logs, retornar información de depuración
         if not logs_data:

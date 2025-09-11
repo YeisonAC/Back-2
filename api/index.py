@@ -20,10 +20,14 @@ try:
     if not GATEWAY_DIR.exists():
         raise ImportError(f"Directory not found: {GATEWAY_DIR}")
     
-    # Importar la app FastAPI
-    logger.info("Attempting to import app from main...")
-    from main import app  # type: ignore
-    logger.info("Successfully imported app from main")
+    # Importar la app FastAPI específicamente desde main.py
+    logger.info("Attempting to import app from main.py...")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("main_module", str(GATEWAY_DIR / "main.py"))
+    main_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(main_module)
+    app = main_module.app
+    logger.info("Successfully imported app from main.py")
     
     # Verificar que la app se importó correctamente
     if app is None:
