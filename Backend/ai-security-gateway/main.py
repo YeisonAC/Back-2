@@ -51,7 +51,7 @@ def get_supabase() -> Client:
     if not supabase_available:
         raise Exception("Supabase not available")
     from supabase import create_client, Client
-    return create_client(supabase_url, supabase_key)
+    return create_client(supabase_url, supabase_anon_key)
 
 # Configuración CORS
 app.add_middleware(
