@@ -156,85 +156,67 @@ async def get_logs(
         # Intentar diferentes tablas de logs
         logs_data = []
         
-        # Intentar descubrir qué tablas existen en la base de datos
-        print(f"DEBUG: Intentando descubrir tablas en la base de datos...")
+        # Usar específicamente la tabla backend_logs que existe y contiene los campos necesarios
+        print(f"DEBUG: Usando tabla backend_logs que contiene los campos request_payload y response_payload")
         
-        # Lista ampliada de posibles tablas de logs
-        possible_log_tables = [
-            "logs", "debug_logs", "api_logs", "request_logs", "security_logs", "audit_logs",
-            "log", "api_log", "request_log", "security_log", "audit_log",
-            "requests", "responses", "api_requests", "api_responses",
-            "gateway_logs", "firewall_logs", "access_logs", "error_logs"
-        ]
-        existing_tables = []
-        
-        for table_name in possible_log_tables:
-            try:
-                sample_response = supabase.table(table_name).select("*").limit(1).execute()
-                if sample_response.data is not None:  # La tabla existe
-                    existing_tables.append(table_name)
-                    print(f"DEBUG: Tabla '{table_name}' existe y tiene datos")
-            except Exception as e:
-                if "404" in str(e) or "does not exist" in str(e) or "relation" in str(e):
-                    print(f"DEBUG: Tabla '{table_name}' no existe")
+        # Verificar que la tabla backend_logs existe y obtener estructura
+        try:
+            sample_response = supabase.table("backend_logs").select("*").limit(1).execute()
+            if sample_response.data:
+                print(f"DEBUG: Tabla backend_logs existe y tiene datos")
+                print(f"DEBUG: Estructura del primer registro: {sample_response.data[0]}")
+                # Mostrar campos disponibles
+                first_record = sample_response.data[0]
+                available_fields = list(first_record.keys())
+                print(f"DEBUG: Campos disponibles en backend_logs: {available_fields}")
+                
+                # Verificar campos específicos que necesitamos
+                required_fields = ["api_key_id", "endpoint", "status", "created_at", "request_payload", "response_payload"]
+                missing_fields = [field for field in required_fields if field not in available_fields]
+                if missing_fields:
+                    print(f"DEBUG: Campos faltantes: {missing_fields}")
                 else:
-                    print(f"DEBUG: Error consultando tabla '{table_name}': {str(e)}")
+                    print(f"DEBUG: Todos los campos requeridos están disponibles")
+            else:
+                print(f"DEBUG: Tabla backend_logs existe pero no tiene datos")
+        except Exception as e:
+            print(f"DEBUG: Error consultando tabla backend_logs: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Error accessing backend_logs table: {str(e)}")
         
-        print(f"DEBUG: Tablas de logs existentes encontradas: {existing_tables}")
-        
-        # Si no se encontraron tablas de logs, intentar ver todas las tablas de la base de datos
-        if not existing_tables:
-            print(f"DEBUG: No se encontraron tablas de logs estándar. Intentando descubrir estructura general...")
-            # Intentar con algunas tablas comunes que podrían existir
-            common_tables = ["users", "profiles", "settings", "config", "metadata"]
-            for table_name in common_tables:
+        # Buscar logs en la tabla backend_logs para las API keys del usuario
+        try:
+            logs_response = supabase.table("backend_logs").select("*").in_("api_key_id", api_key_ids).execute()
+            if logs_response.data:
+                logs_data.extend(logs_response.data)
+                print(f"DEBUG: Encontrados {len(logs_response.data)} logs en backend_logs para el usuario")
+                print(f"DEBUG: Estructura del primer log: {logs_response.data[0] if logs_response.data else 'No logs'}")
+            else:
+                print(f"DEBUG: No se encontraron logs en backend_logs para los API key IDs: {api_key_ids}")
+                # Intentar ver logs sin filtro para verificar si hay datos en general
                 try:
-                    sample_response = supabase.table(table_name).select("*").limit(1).execute()
-                    if sample_response.data is not None:
-                        print(f"DEBUG: Tabla común encontrada: '{table_name}'")
-                        print(f"DEBUG: Estructura: {sample_response.data[0] if sample_response.data else 'Sin datos'}")
-                except Exception as e:
-                    pass
-        
-        # Buscar logs en todas las tablas existentes
-        for table_name in existing_tables:
-            try:
-                logs_response = supabase.table(table_name).select("*").in_("api_key_id", api_key_ids).execute()
-                if logs_response.data:
-                    logs_data.extend(logs_response.data)
-                    print(f"DEBUG: Encontrados {len(logs_response.data)} logs en tabla '{table_name}' para el usuario")
-                    print(f"DEBUG: Estructura del primer log de '{table_name}': {logs_response.data[0] if logs_response.data else 'No logs'}")
-                else:
-                    print(f"DEBUG: No se encontraron logs en tabla '{table_name}' para los API key IDs: {api_key_ids}")
-            except Exception as e:
-                print(f"DEBUG: Error consultando tabla '{table_name}': {str(e)}")
-        
-        # Si no se encontraron logs, intentar sin filtro para ver estructura general
-        if not logs_data:
-            print(f"DEBUG: Intentando ver logs sin filtro para analizar estructura...")
-            for table_name in existing_tables:
-                try:
-                    all_logs_response = supabase.table(table_name).select("*").limit(3).execute()
+                    all_logs_response = supabase.table("backend_logs").select("*").limit(3).execute()
                     if all_logs_response.data:
-                        print(f"DEBUG: Muestra de logs en tabla '{table_name}' (sin filtrar): {all_logs_response.data}")
-                        # Verificar si tienen campos que podrían ser request/response
-                        first_log = all_logs_response.data[0]
-                        payload_fields = [k for k in first_log.keys() if 'payload' in k.lower() or 'request' in k.lower() or 'response' in k.lower()]
-                        if payload_fields:
-                            print(f"DEBUG: Campos de payload encontrados en '{table_name}': {payload_fields}")
+                        print(f"DEBUG: Muestra de logs en backend_logs (sin filtrar): {all_logs_response.data}")
+                        print(f"DEBUG: Hay datos en backend_logs pero no para este usuario")
+                    else:
+                        print(f"DEBUG: No hay datos en backend_logs")
                 except Exception as e:
-                    print(f"DEBUG: Error consultando muestra de tabla '{table_name}': {str(e)}")
+                    print(f"DEBUG: Error consultando muestra de backend_logs: {str(e)}")
+        except Exception as e:
+            print(f"DEBUG: Error consultando backend_logs: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Error querying backend_logs: {str(e)}")
+        
+        # Preparar información de depuración
+        debug_info = {
+            "user_id": current_user_id,
+            "api_key_ids": api_key_ids,
+            "table_used": "backend_logs",
+            "message": "No logs found - check debug info"
+        }
         
         # Si no se encontraron logs, retornar información de depuración
         if not logs_data:
             print(f"DEBUG: No se encontraron logs para el usuario {current_user_id}")
-            # Retornar información de depuración en la respuesta
-            debug_info = {
-                "user_id": current_user_id,
-                "api_key_ids": api_key_ids,
-                "existing_tables": existing_tables,
-                "message": "No logs found - check debug info"
-            }
             # Crear una respuesta temporal con información de depuración
             class DebugResponse(BaseModel):
                 data: List = []
