@@ -61,19 +61,22 @@ else:
 app = FastAPI(title="EONS API - Minimal Version", version="1.0.0")
 
 # Función para obtener cliente de Supabase (usando la función de supabase_client.py)
-def get_supabase() -> Client:
+def get_supabase():
     try:
         from supabase_client import get_supabase as get_supabase_client
         client = get_supabase_client()
-        if client is None:
-            raise Exception("Supabase not available")
         return client
     except ImportError:
         # Fallback si no se puede importar supabase_client
         if not supabase_available:
-            raise Exception("Supabase not available")
-        from supabase import create_client, Client
-        return create_client(supabase_url, supabase_anon_key)
+            return None
+        try:
+            from supabase import create_client, Client
+            return create_client(supabase_url, supabase_anon_key)
+        except Exception:
+            return None
+    except Exception:
+        return None
 
 # Configuración CORS
 app.add_middleware(
@@ -318,6 +321,52 @@ async def test_api_keys():
             "error": f"Test failed: {str(e)}",
             "status": "error",
             "exception_type": type(e).__name__,
+            "traceback": traceback.format_exc()
+        }
+
+@app.get("/api/debug/supabase")
+async def debug_supabase():
+    """Endpoint de diagnóstico para verificar la configuración de Supabase"""
+    try:
+        # Verificar variables de entorno
+        env_vars = {
+            "NEXT_PUBLIC_SUPABASE_URL": os.getenv("NEXT_PUBLIC_SUPABASE_URL"),
+            "NEXT_PUBLIC_SUPABASE_ANON_KEY": "***" + os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "")[-10:] if os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY") else None,
+            "SUPABASE_SERVICE_ROLE_KEY": "***" + os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")[-10:] if os.getenv("SUPABASE_SERVICE_ROLE_KEY") else None,
+        }
+        
+        # Probar conexión a Supabase
+        sb = get_supabase()
+        if sb is None:
+            return {
+                "status": "error",
+                "message": "Supabase client is None",
+                "env_vars": env_vars
+            }
+        
+        # Probar consulta simple
+        try:
+            result = sb.table("api_keys").select("count").limit(1).execute()
+            table_accessible = True
+            table_error = None
+        except Exception as e:
+            table_accessible = False
+            table_error = str(e)
+        
+        return {
+            "status": "success",
+            "message": "Supabase configuration check",
+            "env_vars": env_vars,
+            "supabase_client": "available",
+            "table_accessible": table_accessible,
+            "table_error": table_error
+        }
+        
+    except Exception as e:
+        import traceback
+        return {
+            "status": "error",
+            "message": f"Debug failed: {str(e)}",
             "traceback": traceback.format_exc()
         }
 
@@ -925,7 +974,7 @@ def _is_admin(request: Request) -> bool:
     # Por ahora, permitimos todas las operaciones para desarrollo
     return True
 
-@app.post("/api/admin/keys", response_model=APIKeyResponse)
+@app.post("/api/admin/keys")
 async def admin_create_api_key(request: Request, body: CreateKeyRequest):
     """Crea una nueva API key (solo admin)"""
     if not _is_admin(request):
@@ -1000,28 +1049,58 @@ async def admin_create_api_key(request: Request, body: CreateKeyRequest):
             detail=f"Internal server error: {str(e)}"
         )
 
-@app.get("/api/admin/keys", response_model=List[APIKeyMetaResponse])
+@app.get("/api/admin/keys")
 async def admin_list_api_keys(request: Request, limit: int = 100, offset: int = 0, user_id: Optional[str] = None):
     """Lista todas las API keys (solo admin)"""
+    print(f"DEBUG: Starting admin_list_api_keys with limit: {limit}, offset: {offset}, user_id: {user_id}")
+    
     if not _is_admin(request):
-        raise HTTPException(status_code=403, detail="Admin access required")
+        return JSONResponse(
+            status_code=403,
+            content={"error": "Admin access required"}
+        )
     
     try:
-        keys = list_api_keys(limit=limit, offset=offset, owner_user_id=user_id)
+        # Verificar conectividad a Supabase primero
+        sb = get_supabase()
+        print(f"DEBUG: Supabase client: {sb is not None}")
         
-        return [
-            APIKeyMetaResponse(
-                id=key.get("id", ""),
-                name=key.get("name", ""),
-                key_id=key.get("key_id", ""),
-                rate_limit=key.get("rate_limit"),
-                created_at=key.get("created_at", ""),
-                is_active=key.get("active", True),
-                owner_user_id=key.get("user_id")
-            ) for key in keys
-        ]
+        if sb is None:
+            print("ERROR: Supabase client is None")
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Database service unavailable. Please check your Supabase configuration."}
+            )
+        
+        print(f"DEBUG: Getting API keys for user: {user_id}")
+        keys = list_api_keys(limit=limit, offset=offset, owner_user_id=user_id)
+        print(f"DEBUG: Found {len(keys)} keys")
+        
+        response_data = []
+        for key in keys:
+            print(f"DEBUG: Processing key: {key}")
+            key_data = {
+                "id": key.get("key_id", ""),
+                "name": key.get("name", ""),
+                "key_id": key.get("key_id", ""),
+                "rate_limit": key.get("rate_limit"),
+                "created_at": key.get("created_at", ""),
+                "is_active": key.get("active", True),
+                "owner_user_id": key.get("user_id")
+            }
+            response_data.append(key_data)
+        
+        print(f"DEBUG: Final response: {response_data}")
+        return JSONResponse(content=response_data)
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error listing API keys: {str(e)}")
+        print(f"ERROR: Unexpected error in admin_list_api_keys: {str(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Error listing API keys: {str(e)}"}
+        )
 
 @app.delete("/api/admin/keys/{key_id}")
 async def admin_delete_api_key(request: Request, key_id: str):
@@ -1082,101 +1161,145 @@ def _require_user_id(request: Request) -> str:
         user_id = "dev-user-id"
     return user_id
 
-@app.post("/api/keys", response_model=APIKeyResponse)
+@app.post("/api/keys")
 async def mgmt_create_key(request: Request, body: MgmtCreateKeyRequest):
     """Crea una nueva API key para el usuario autenticado"""
+    print(f"DEBUG: Starting mgmt_create_key with body: {body}")
+    
     try:
         user_id = _require_user_id(request)
+        print(f"DEBUG: User ID: {user_id}")
         
         # Verificar conectividad a Supabase primero
         sb = get_supabase()
+        print(f"DEBUG: Supabase client: {sb is not None}")
+        
         if sb is None:
-            raise HTTPException(
-                status_code=503, 
-                detail="Database service unavailable. Please check your Supabase configuration."
+            print("ERROR: Supabase client is None")
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Database service unavailable. Please check your Supabase configuration."}
             )
         
+        print(f"DEBUG: Creating API key with name: {body.name}, rate_limit: {body.rate_limit}")
         full_key = create_api_key(
             name=body.name,
             rate_limit=body.rate_limit,
             owner_user_id=user_id
         )
+        print(f"DEBUG: Created API key: {full_key is not None}")
         
         if not full_key:
-            raise HTTPException(
-                status_code=500, 
-                detail="Failed to create API key. Please try again or contact support."
+            print("ERROR: create_api_key returned None")
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Failed to create API key. Please try again or contact support."}
             )
         
         # Parsear la clave para obtener el key_id
         key_id, _ = parse_full_key(full_key)
+        print(f"DEBUG: Parsed key_id: {key_id}")
         
         if not key_id:
-            raise HTTPException(
-                status_code=500, 
-                detail="Invalid API key format generated. Please try again."
+            print("ERROR: Failed to parse key_id from full_key")
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Invalid API key format generated. Please try again."}
             )
         
         # Obtener metadatos de la clave recién creada
+        print(f"DEBUG: Getting metadata for key_id: {key_id}")
         key_meta = get_api_key_meta(key_id)
+        print(f"DEBUG: Key metadata: {key_meta}")
         
         if not key_meta:
             # Fallback si no se pueden obtener metadatos
-            return APIKeyResponse(
-                id=key_id,
-                name=body.name,
-                key_id=key_id,
-                full_key=full_key,
-                rate_limit=body.rate_limit,
-                created_at=datetime.now(timezone.utc).isoformat(),
-                is_active=True,
-                owner_user_id=user_id
-            )
+            print("DEBUG: Using fallback response without metadata")
+            response_data = {
+                "id": key_id,
+                "name": body.name,
+                "key_id": key_id,
+                "full_key": full_key,
+                "rate_limit": body.rate_limit,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "is_active": True,
+                "owner_user_id": user_id
+            }
+            print(f"DEBUG: Fallback response: {response_data}")
+            return JSONResponse(content=response_data)
         
-        return APIKeyResponse(
-            id=key_meta.get("key_id", key_id),
-            name=key_meta.get("name", body.name),
-            key_id=key_meta.get("key_id", key_id),
-            full_key=full_key,
-            rate_limit=key_meta.get("rate_limit"),
-            created_at=key_meta.get("created_at", datetime.now(timezone.utc).isoformat()),
-            is_active=key_meta.get("active", True),
-            owner_user_id=key_meta.get("user_id")
-        )
-    except HTTPException:
-        # Re-lanzar HTTPException para mantener el status code correcto
-        raise
+        response_data = {
+            "id": key_meta.get("key_id", key_id),
+            "name": key_meta.get("name", body.name),
+            "key_id": key_meta.get("key_id", key_id),
+            "full_key": full_key,
+            "rate_limit": key_meta.get("rate_limit"),
+            "created_at": key_meta.get("created_at", datetime.now(timezone.utc).isoformat()),
+            "is_active": key_meta.get("active", True),
+            "owner_user_id": key_meta.get("user_id")
+        }
+        print(f"DEBUG: Full response: {response_data}")
+        return JSONResponse(content=response_data)
+        
     except Exception as e:
         # Log del error para debugging
         print(f"ERROR: Unexpected error in mgmt_create_key: {str(e)}")
         import traceback
         print(f"Traceback: {traceback.format_exc()}")
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Internal server error: {str(e)}"
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Internal server error: {str(e)}"}
         )
 
-@app.get("/api/keys", response_model=List[APIKeyMetaResponse])
+@app.get("/api/keys")
 async def mgmt_list_keys(request: Request, limit: int = 100, offset: int = 0):
     """Lista las API keys del usuario autenticado"""
+    print(f"DEBUG: Starting mgmt_list_keys with limit: {limit}, offset: {offset}")
+    
     try:
         user_id = _require_user_id(request)
+        print(f"DEBUG: User ID: {user_id}")
         
+        # Verificar conectividad a Supabase primero
+        sb = get_supabase()
+        print(f"DEBUG: Supabase client: {sb is not None}")
+        
+        if sb is None:
+            print("ERROR: Supabase client is None")
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Database service unavailable. Please check your Supabase configuration."}
+            )
+        
+        print(f"DEBUG: Getting API keys for user: {user_id}")
         keys = list_api_keys(limit=limit, offset=offset, owner_user_id=user_id)
+        print(f"DEBUG: Found {len(keys)} keys")
         
-        return [
-            APIKeyMetaResponse(
-                id=key.get("id", ""),
-                name=key.get("name", ""),
-                key_id=key.get("key_id", ""),
-                rate_limit=key.get("rate_limit"),
-                created_at=key.get("created_at", ""),
-                is_active=key.get("active", True),
-                owner_user_id=key.get("user_id")
-            ) for key in keys
-        ]
+        response_data = []
+        for key in keys:
+            print(f"DEBUG: Processing key: {key}")
+            key_data = {
+                "id": key.get("key_id", ""),
+                "name": key.get("name", ""),
+                "key_id": key.get("key_id", ""),
+                "rate_limit": key.get("rate_limit"),
+                "created_at": key.get("created_at", ""),
+                "is_active": key.get("active", True),
+                "owner_user_id": key.get("user_id")
+            }
+            response_data.append(key_data)
+        
+        print(f"DEBUG: Final response: {response_data}")
+        return JSONResponse(content=response_data)
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error listing API keys: {str(e)}")
+        print(f"ERROR: Unexpected error in mgmt_list_keys: {str(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Error listing API keys: {str(e)}"}
+        )
 
 @app.put("/api/keys/{key_id}", response_model=APIKeyMetaResponse)
 async def mgmt_update_key(request: Request, key_id: str, body: MgmtUpdateKeyRequest):
