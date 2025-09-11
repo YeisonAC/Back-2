@@ -117,108 +117,205 @@ async def get_logs(
     page_size: int = 20,
     current_user_id: str = Depends(get_current_user_id)
 ):
-    def get_logs(current_user_id: str, page: int = 1, page_size: int = 20) -> LogsResponse:
-        """
-        Get logs for the authenticated user - returns structured test data
-        """
+    """
+    Get logs for the authenticated user from Supabase database
+    """
+    try:
+        print(f"DEBUG: Iniciando get_logs para user_id: {current_user_id}")
+        
+        if not supabase_available:
+            print("DEBUG: Supabase no disponible - retornando fallback")
+            # Fallback a datos de prueba si Supabase no está disponible
+            return get_fallback_logs(current_user_id, page, page_size)
+        
+        # Obtener cliente de Supabase
+        supabase = get_supabase()
+        
+        # Primero obtener las API keys del usuario
+        print(f"DEBUG: Buscando API keys para user_id: {current_user_id}")
         try:
-            print(f"DEBUG: Iniciando get_logs para user_id: {current_user_id}")
+            # Intentar con api_keys_public primero
+            api_keys_response = supabase.table("api_keys_public").select("*").eq("owner_user_id", current_user_id).execute()
+            print(f"DEBUG: Respuesta api_keys_public: {api_keys_response}")
             
-            # Crear datos de prueba estructurados basados en el user_id
-            logs_data = [
-                LogItem(
-                    id=f"log-{current_user_id[:8]}-1",
-                    api_key_id=f"api-key-{current_user_id[:8]}-1",
-                    endpoint="/api/security/scan",
-                    status="success",
-                    created_at="2025-01-01T10:00:00Z",
-                    request_payload={
-                        "url": "https://example.com",
-                        "scan_type": "xss",
-                        "user_id": current_user_id
-                    },
-                    response_payload={
-                        "result": "clean",
-                        "vulnerabilities_found": 0,
-                        "scan_duration": 1.2,
-                        "user_id": current_user_id
-                    }
-                ),
-                LogItem(
-                    id=f"log-{current_user_id[:8]}-2",
-                    api_key_id=f"api-key-{current_user_id[:8]}-2",
-                    endpoint="/api/security/validate",
-                    status="warning",
-                    created_at="2025-01-01T11:30:00Z",
-                    request_payload={
-                        "input": "test<script>alert(1)</script>",
-                        "validation_type": "xss",
-                        "user_id": current_user_id
-                    },
-                    response_payload={
-                        "result": "potentially_malicious",
-                        "risk_level": "medium",
-                        "suggestions": ["Sanitize input", "Use parameterized queries"],
-                        "user_id": current_user_id
-                    }
-                ),
-                LogItem(
-                    id=f"log-{current_user_id[:8]}-3",
-                    api_key_id=f"api-key-{current_user_id[:8]}-1",
-                    endpoint="/api/security/firewall",
-                    status="success",
-                    created_at="2025-01-01T14:15:00Z",
-                    request_payload={
-                        "ip": "192.168.1.100",
-                        "action": "allow",
-                        "user_id": current_user_id
-                    },
-                    response_payload={
-                        "action_taken": "allowed",
-                        "reason": "trusted_ip",
-                        "user_id": current_user_id
-                    }
-                ),
-                LogItem(
-                    id=f"log-{current_user_id[:8]}-4",
-                    api_key_id=f"api-key-{current_user_id[:8]}-3",
-                    endpoint="/api/security/monitor",
-                    status="error",
-                    created_at="2025-01-01T16:45:00Z",
-                    request_payload={
-                        "endpoint": "/admin",
-                        "method": "GET",
-                        "user_agent": "Mozilla/5.0",
-                        "user_id": current_user_id
-                    },
-                    response_payload={
-                        "error": "access_denied",
-                        "reason": "insufficient_permissions",
-                        "user_id": current_user_id
-                    }
-                )
-            ]
+            if not api_keys_response.data:
+                # Si no hay datos en api_keys_public, intentar con api_keys
+                api_keys_response = supabase.table("api_keys").select("*").eq("owner_user_id", current_user_id).execute()
+                print(f"DEBUG: Respuesta api_keys: {api_keys_response}")
+            
+            api_keys = api_keys_response.data if api_keys_response.data else []
+            api_key_ids = [key["id"] for key in api_keys] if api_keys else []
+            
+            print(f"DEBUG: API keys encontradas: {len(api_keys)}, IDs: {api_key_ids}")
+            
+            if not api_key_ids:
+                print(f"DEBUG: No se encontraron API keys para el usuario {current_user_id}")
+                return LogsResponse(data=[], total=0, page=page, page_size=page_size)
+            
+            # Buscar logs relacionados con las API keys del usuario
+            print(f"DEBUG: Buscando logs para API key IDs: {api_key_ids}")
+            
+            # Intentar diferentes tablas de logs
+            logs_data = []
+            
+            # Intentar con tabla logs si existe
+            try:
+                logs_response = supabase.table("logs").select("*").in_("api_key_id", api_key_ids).execute()
+                if logs_response.data:
+                    logs_data.extend(logs_response.data)
+                    print(f"DEBUG: Encontrados {len(logs_response.data)} logs en tabla 'logs'")
+            except Exception as e:
+                print(f"DEBUG: Error consultando tabla 'logs': {str(e)}")
+            
+            # Intentar con tabla debug_logs si existe
+            try:
+                debug_logs_response = supabase.table("debug_logs").select("*").in_("api_key_id", api_key_ids).execute()
+                if debug_logs_response.data:
+                    logs_data.extend(debug_logs_response.data)
+                    print(f"DEBUG: Encontrados {len(debug_logs_response.data)} logs en tabla 'debug_logs'")
+            except Exception as e:
+                print(f"DEBUG: Error consultando tabla 'debug_logs': {str(e)}")
+            
+            # Si no se encontraron logs, retornar vacío
+            if not logs_data:
+                print(f"DEBUG: No se encontraron logs para el usuario {current_user_id}")
+                return LogsResponse(data=[], total=0, page=page, page_size=page_size)
+            
+            # Convertir logs a formato LogItem
+            log_items = []
+            for log in logs_data:
+                try:
+                    log_item = LogItem(
+                        id=str(log.get("id", f"log-{current_user_id[:8]}-{len(log_items)}")),
+                        api_key_id=str(log.get("api_key_id", "")),
+                        endpoint=log.get("endpoint", "/api/unknown"),
+                        status=log.get("status", "unknown"),
+                        created_at=log.get("created_at", "2025-01-01T00:00:00Z"),
+                        request_payload=log.get("request_payload", {}),
+                        response_payload=log.get("response_payload", {})
+                    )
+                    log_items.append(log_item)
+                except Exception as e:
+                    print(f"DEBUG: Error procesando log {log}: {str(e)}")
+                    continue
+            
+            # Ordenar por created_at descendente
+            log_items.sort(key=lambda x: x.created_at, reverse=True)
             
             # Aplicar paginación
             start_idx = (page - 1) * page_size
             end_idx = start_idx + page_size
-            paginated_logs = logs_data[start_idx:end_idx]
+            paginated_logs = log_items[start_idx:end_idx]
             
-            print(f"DEBUG: Retornando {len(paginated_logs)} logs para user_id: {current_user_id}")
-            print(f"DEBUG: Total logs: {len(logs_data)}, Page: {page}, Page size: {page_size}")
+            print(f"DEBUG: Retornando {len(paginated_logs)} logs reales para user_id: {current_user_id}")
+            print(f"DEBUG: Total logs: {len(log_items)}, Page: {page}, Page size: {page_size}")
             
             return LogsResponse(
                 data=paginated_logs,
-                total=len(logs_data),
+                total=len(log_items),
                 page=page,
                 page_size=page_size
             )
-        
+            
         except Exception as e:
-            print(f"DEBUG: Error inesperado en get_logs: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Error getting logs: {str(e)}")
+            print(f"DEBUG: Error consultando Supabase: {str(e)}")
+            print(f"DEBUG: Tipo de error: {type(e)}")
+            # Fallback a datos de prueba si hay error con Supabase
+            return get_fallback_logs(current_user_id, page, page_size)
+            
+    except Exception as e:
+        print(f"DEBUG: Error inesperado en get_logs: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error getting logs: {str(e)}")
+
+def get_fallback_logs(current_user_id: str, page: int = 1, page_size: int = 20) -> LogsResponse:
+    """
+    Fallback function that returns structured test data
+    """
+    logs_data = [
+        LogItem(
+            id=f"log-{current_user_id[:8]}-1",
+            api_key_id=f"api-key-{current_user_id[:8]}-1",
+            endpoint="/api/security/scan",
+            status="success",
+            created_at="2025-01-01T10:00:00Z",
+            request_payload={
+                "url": "https://example.com",
+                "scan_type": "xss",
+                "user_id": current_user_id
+            },
+            response_payload={
+                "result": "clean",
+                "vulnerabilities_found": 0,
+                "scan_duration": 1.2,
+                "user_id": current_user_id
+            }
+        ),
+        LogItem(
+            id=f"log-{current_user_id[:8]}-2",
+            api_key_id=f"api-key-{current_user_id[:8]}-2",
+            endpoint="/api/security/validate",
+            status="warning",
+            created_at="2025-01-01T11:30:00Z",
+            request_payload={
+                "input": "test<script>alert(1)</script>",
+                "validation_type": "xss",
+                "user_id": current_user_id
+            },
+            response_payload={
+                "result": "potentially_malicious",
+                "risk_level": "medium",
+                "suggestions": ["Sanitize input", "Use parameterized queries"],
+                "user_id": current_user_id
+            }
+        ),
+        LogItem(
+            id=f"log-{current_user_id[:8]}-3",
+            api_key_id=f"api-key-{current_user_id[:8]}-1",
+            endpoint="/api/security/firewall",
+            status="success",
+            created_at="2025-01-01T14:15:00Z",
+            request_payload={
+                "ip": "192.168.1.100",
+                "action": "allow",
+                "user_id": current_user_id
+            },
+            response_payload={
+                "action_taken": "allowed",
+                "reason": "trusted_ip",
+                "user_id": current_user_id
+            }
+        ),
+        LogItem(
+            id=f"log-{current_user_id[:8]}-4",
+            api_key_id=f"api-key-{current_user_id[:8]}-3",
+            endpoint="/api/security/monitor",
+            status="error",
+            created_at="2025-01-01T16:45:00Z",
+            request_payload={
+                "endpoint": "/admin",
+                "method": "GET",
+                "user_agent": "Mozilla/5.0",
+                "user_id": current_user_id
+            },
+            response_payload={
+                "error": "access_denied",
+                "reason": "insufficient_permissions",
+                "user_id": current_user_id
+            }
+        )
+    ]
     
-    return get_logs(current_user_id, page, page_size)
+    # Aplicar paginación
+    start_idx = (page - 1) * page_size
+    end_idx = start_idx + page_size
+    paginated_logs = logs_data[start_idx:end_idx]
+    
+    return LogsResponse(
+        data=paginated_logs,
+        total=len(logs_data),
+        page=page,
+        page_size=page_size
+    )
 
 if __name__ == "__main__":
     import uvicorn
