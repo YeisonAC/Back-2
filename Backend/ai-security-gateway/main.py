@@ -25,8 +25,8 @@ except ImportError:
 load_dotenv(dotenv_path=Path(__file__).with_name('.env'))
 
 # Configuración de modelos Groq
-GROQ_CLASSIFIER_MODEL = os.getenv("GROQ_CLASSIFIER_MODEL", "llama3-8b-8192")
-GROQ_COMPLETION_MODEL = os.getenv("GROQ_COMPLETION_MODEL", "llama3-8b-8192")
+GROQ_CLASSIFIER_MODEL = os.getenv("GROQ_CLASSIFIER_MODEL", "openai-oss-8b")
+GROQ_COMPLETION_MODEL = os.getenv("GROQ_COMPLETION_MODEL", "openai-oss-8b")
 
 # Configuración de Supabase
 supabase_url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
@@ -369,6 +369,147 @@ async def debug_supabase():
             "message": f"Debug failed: {str(e)}",
             "traceback": traceback.format_exc()
         }
+
+@app.get("/api/debug/groq")
+async def debug_groq():
+    """Endpoint de diagnóstico para verificar la configuración de Groq"""
+    try:
+        # Verificar variables de entorno
+        groq_api_key = os.getenv('GROQ_API_KEY')
+        groq_url = GROQ_CHAT_URL
+        
+        env_vars = {
+            "GROQ_API_KEY": "***" + groq_api_key[-10:] if groq_api_key else None,
+            "GROQ_CHAT_URL": groq_url,
+        }
+        
+        if not groq_api_key:
+            return {
+                "status": "error",
+                "message": "GROQ_API_KEY not found",
+                "env_vars": env_vars
+            }
+        
+        # Probar conexión a Groq con una petición simple
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {groq_api_key}",
+        }
+        
+        test_payload = {
+            "model": "openai-oss-8b",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 10
+        }
+        
+        try:
+            response = requests.post(groq_url, headers=headers, json=test_payload, timeout=10)
+            groq_accessible = True
+            groq_status = response.status_code
+            groq_error = None
+            
+            if response.status_code == 200:
+                groq_response = response.json()
+                groq_success = True
+            else:
+                groq_success = False
+                groq_error = response.text
+                
+        except Exception as e:
+            groq_accessible = False
+            groq_status = None
+            groq_error = str(e)
+            groq_success = False
+        
+        return {
+            "status": "success",
+            "message": "Groq configuration check",
+            "env_vars": env_vars,
+            "groq_accessible": groq_accessible,
+            "groq_status": groq_status,
+            "groq_success": groq_success,
+            "groq_error": groq_error
+        }
+        
+    except Exception as e:
+        import traceback
+        return {
+            "status": "error",
+            "message": f"Debug failed: {str(e)}",
+            "traceback": traceback.format_exc()
+        }
+
+@app.post("/api/test/chat")
+async def test_chat_completions(request: Request):
+    """Endpoint de prueba para verificar el chat completions"""
+    try:
+        print("DEBUG: Starting test chat completions")
+        
+        # Verificar variables de entorno
+        groq_api_key = os.getenv('GROQ_API_KEY')
+        if not groq_api_key:
+            return JSONResponse(
+                status_code=500,
+                content={"error": "GROQ_API_KEY not found"}
+            )
+        
+        # Obtener IP del cliente
+        client_ip = get_client_ip(request)
+        print(f"DEBUG: Client IP: {client_ip}")
+        
+        # Headers para Groq
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {groq_api_key}",
+            "X-Forwarded-For": client_ip,
+        }
+        
+        # Payload de prueba simple
+        test_payload = {
+            "model": "openai-oss-8b",
+            "messages": [{"role": "user", "content": "Hello, how are you?"}],
+            "max_tokens": 50,
+            "temperature": 0.7
+        }
+        
+        print(f"DEBUG: Sending request to Groq: {test_payload}")
+        
+        # Hacer la petición a Groq
+        response = requests.post(GROQ_CHAT_URL, headers=headers, json=test_payload, timeout=30)
+        
+        print(f"DEBUG: Groq response status: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            print(f"DEBUG: Groq response data: {data}")
+            
+            return JSONResponse(content={
+                "status": "success",
+                "message": "Chat completions test successful",
+                "groq_response": data,
+                "client_ip": client_ip
+            })
+        else:
+            print(f"ERROR: Groq API error: {response.status_code} - {response.text}")
+            return JSONResponse(
+                status_code=response.status_code,
+                content={
+                    "error": f"Groq API error: {response.text}",
+                    "status_code": response.status_code
+                }
+            )
+            
+    except Exception as e:
+        print(f"ERROR: Test chat completions failed: {str(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": f"Test failed: {str(e)}",
+                "traceback": traceback.format_exc()
+            }
+        )
 
 @app.get("/api/logs", response_model=LogsResponse)
 async def get_logs(
@@ -984,9 +1125,10 @@ async def admin_create_api_key(request: Request, body: CreateKeyRequest):
         # Verificar conectividad a Supabase primero
         sb = get_supabase()
         if sb is None:
-            raise HTTPException(
-                status_code=503, 
-                detail="Database service unavailable. Please check your Supabase configuration."
+            print("ERROR: Supabase client is None")
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Database service unavailable. Please check your Supabase configuration."}
             )
         
         full_key = create_api_key(
@@ -996,18 +1138,20 @@ async def admin_create_api_key(request: Request, body: CreateKeyRequest):
         )
         
         if not full_key:
-            raise HTTPException(
-                status_code=500, 
-                detail="Failed to create API key. Please try again or contact support."
+            print("ERROR: create_api_key returned None")
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Failed to create API key. Please try again or contact support."}
             )
         
         # Parsear la clave para obtener el key_id
         key_id, _ = parse_full_key(full_key)
         
         if not key_id:
-            raise HTTPException(
-                status_code=500, 
-                detail="Invalid API key format generated. Please try again."
+            print("ERROR: Failed to parse key_id from full_key")
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Invalid API key format generated. Please try again."}
             )
         
         # Obtener metadatos de la clave recién creada
@@ -1036,17 +1180,14 @@ async def admin_create_api_key(request: Request, body: CreateKeyRequest):
             is_active=key_meta.get("active", True),
             owner_user_id=key_meta.get("user_id")
         )
-    except HTTPException:
-        # Re-lanzar HTTPException para mantener el status code correcto
-        raise
     except Exception as e:
         # Log del error para debugging
         print(f"ERROR: Unexpected error in admin_create_api_key: {str(e)}")
         import traceback
         print(f"Traceback: {traceback.format_exc()}")
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Internal server error: {str(e)}"
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Internal server error: {str(e)}"}
         )
 
 @app.get("/api/admin/keys")
