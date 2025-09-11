@@ -345,18 +345,28 @@ async def get_logs(
                 
                 # Si son strings, intentar convertirlos a diccionarios
                 if isinstance(request_payload, str):
+                    print(f"DEBUG: request_payload es string: {request_payload[:100]}...")
                     try:
                         request_payload = json.loads(request_payload)
-                    except json.JSONDecodeError:
+                        print(f"DEBUG: request_payload convertido exitosamente a dict")
+                    except json.JSONDecodeError as e:
+                        print(f"DEBUG: Error convirtiendo request_payload: {e}")
                         # Si no es JSON válido, dejar como string o usar dict vacío
                         request_payload = {}
+                else:
+                    print(f"DEBUG: request_payload no es string, tipo: {type(request_payload)}")
                         
                 if isinstance(response_payload, str):
+                    print(f"DEBUG: response_payload es string: {response_payload[:100]}...")
                     try:
                         response_payload = json.loads(response_payload)
-                    except json.JSONDecodeError:
+                        print(f"DEBUG: response_payload convertido exitosamente a dict")
+                    except json.JSONDecodeError as e:
+                        print(f"DEBUG: Error convirtiendo response_payload: {e}")
                         # Si no es JSON válido, dejar como string o usar dict vacío
                         response_payload = {}
+                else:
+                    print(f"DEBUG: response_payload no es string, tipo: {type(response_payload)}")
                 
                 log_item = LogItem(
                     id=str(log.get("id", f"log-{current_user_id[:8]}-{len(log_items)}")),
