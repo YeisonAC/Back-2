@@ -156,42 +156,52 @@ async def get_logs(
         # Intentar diferentes tablas de logs
         logs_data = []
         
-        # Verificar si existen logs sin filtrar primero
-        try:
-            all_logs_response = supabase.table("logs").select("*").limit(5).execute()
-            print(f"DEBUG: Muestra de logs en tabla 'logs' (sin filtrar): {all_logs_response.data}")
-        except Exception as e:
-            print(f"DEBUG: Error consultando muestra de tabla 'logs': {str(e)}")
+        # Verificar qué tablas de logs existen
+        possible_log_tables = ["logs", "debug_logs", "api_logs", "request_logs", "security_logs", "audit_logs"]
+        existing_tables = []
         
-        try:
-            all_debug_logs_response = supabase.table("debug_logs").select("*").limit(5).execute()
-            print(f"DEBUG: Muestra de debug_logs en tabla 'debug_logs' (sin filtrar): {all_debug_logs_response.data}")
-        except Exception as e:
-            print(f"DEBUG: Error consultando muestra de tabla 'debug_logs': {str(e)}")
+        for table_name in possible_log_tables:
+            try:
+                sample_response = supabase.table(table_name).select("*").limit(1).execute()
+                if sample_response.data is not None:  # La tabla existe
+                    existing_tables.append(table_name)
+                    print(f"DEBUG: Tabla '{table_name}' existe y tiene datos")
+            except Exception as e:
+                if "404" in str(e) or "does not exist" in str(e):
+                    print(f"DEBUG: Tabla '{table_name}' no existe")
+                else:
+                    print(f"DEBUG: Error consultando tabla '{table_name}': {str(e)}")
         
-        # Intentar con tabla logs si existe
-        try:
-            logs_response = supabase.table("logs").select("*").in_("api_key_id", api_key_ids).execute()
-            if logs_response.data:
-                logs_data.extend(logs_response.data)
-                print(f"DEBUG: Encontrados {len(logs_response.data)} logs en tabla 'logs' para el usuario")
-                print(f"DEBUG: Estructura del primer log: {logs_response.data[0] if logs_response.data else 'No logs'}")
-            else:
-                print(f"DEBUG: No se encontraron logs en tabla 'logs' para los API key IDs: {api_key_ids}")
-        except Exception as e:
-            print(f"DEBUG: Error consultando tabla 'logs': {str(e)}")
+        print(f"DEBUG: Tablas de logs existentes: {existing_tables}")
         
-        # Intentar con tabla debug_logs si existe
-        try:
-            debug_logs_response = supabase.table("debug_logs").select("*").in_("api_key_id", api_key_ids).execute()
-            if debug_logs_response.data:
-                logs_data.extend(debug_logs_response.data)
-                print(f"DEBUG: Encontrados {len(debug_logs_response.data)} logs en tabla 'debug_logs' para el usuario")
-                print(f"DEBUG: Estructura del primer debug_log: {debug_logs_response.data[0] if debug_logs_response.data else 'No debug_logs'}")
-            else:
-                print(f"DEBUG: No se encontraron debug_logs en tabla 'debug_logs' para los API key IDs: {api_key_ids}")
-        except Exception as e:
-            print(f"DEBUG: Error consultando tabla 'debug_logs': {str(e)}")
+        # Buscar logs en todas las tablas existentes
+        for table_name in existing_tables:
+            try:
+                logs_response = supabase.table(table_name).select("*").in_("api_key_id", api_key_ids).execute()
+                if logs_response.data:
+                    logs_data.extend(logs_response.data)
+                    print(f"DEBUG: Encontrados {len(logs_response.data)} logs en tabla '{table_name}' para el usuario")
+                    print(f"DEBUG: Estructura del primer log de '{table_name}': {logs_response.data[0] if logs_response.data else 'No logs'}")
+                else:
+                    print(f"DEBUG: No se encontraron logs en tabla '{table_name}' para los API key IDs: {api_key_ids}")
+            except Exception as e:
+                print(f"DEBUG: Error consultando tabla '{table_name}': {str(e)}")
+        
+        # Si no se encontraron logs, intentar sin filtro para ver estructura general
+        if not logs_data:
+            print(f"DEBUG: Intentando ver logs sin filtro para analizar estructura...")
+            for table_name in existing_tables:
+                try:
+                    all_logs_response = supabase.table(table_name).select("*").limit(3).execute()
+                    if all_logs_response.data:
+                        print(f"DEBUG: Muestra de logs en tabla '{table_name}' (sin filtrar): {all_logs_response.data}")
+                        # Verificar si tienen campos que podrían ser request/response
+                        first_log = all_logs_response.data[0]
+                        payload_fields = [k for k in first_log.keys() if 'payload' in k.lower() or 'request' in k.lower() or 'response' in k.lower()]
+                        if payload_fields:
+                            print(f"DEBUG: Campos de payload encontrados en '{table_name}': {payload_fields}")
+                except Exception as e:
+                    print(f"DEBUG: Error consultando muestra de tabla '{table_name}': {str(e)}")
         
         # Si no se encontraron logs, retornar vacío
         if not logs_data:
