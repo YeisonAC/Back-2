@@ -156,8 +156,16 @@ async def get_logs(
         # Intentar diferentes tablas de logs
         logs_data = []
         
-        # Verificar qué tablas de logs existen
-        possible_log_tables = ["logs", "debug_logs", "api_logs", "request_logs", "security_logs", "audit_logs"]
+        # Intentar descubrir qué tablas existen en la base de datos
+        print(f"DEBUG: Intentando descubrir tablas en la base de datos...")
+        
+        # Lista ampliada de posibles tablas de logs
+        possible_log_tables = [
+            "logs", "debug_logs", "api_logs", "request_logs", "security_logs", "audit_logs",
+            "log", "api_log", "request_log", "security_log", "audit_log",
+            "requests", "responses", "api_requests", "api_responses",
+            "gateway_logs", "firewall_logs", "access_logs", "error_logs"
+        ]
         existing_tables = []
         
         for table_name in possible_log_tables:
@@ -167,12 +175,26 @@ async def get_logs(
                     existing_tables.append(table_name)
                     print(f"DEBUG: Tabla '{table_name}' existe y tiene datos")
             except Exception as e:
-                if "404" in str(e) or "does not exist" in str(e):
+                if "404" in str(e) or "does not exist" in str(e) or "relation" in str(e):
                     print(f"DEBUG: Tabla '{table_name}' no existe")
                 else:
                     print(f"DEBUG: Error consultando tabla '{table_name}': {str(e)}")
         
-        print(f"DEBUG: Tablas de logs existentes: {existing_tables}")
+        print(f"DEBUG: Tablas de logs existentes encontradas: {existing_tables}")
+        
+        # Si no se encontraron tablas de logs, intentar ver todas las tablas de la base de datos
+        if not existing_tables:
+            print(f"DEBUG: No se encontraron tablas de logs estándar. Intentando descubrir estructura general...")
+            # Intentar con algunas tablas comunes que podrían existir
+            common_tables = ["users", "profiles", "settings", "config", "metadata"]
+            for table_name in common_tables:
+                try:
+                    sample_response = supabase.table(table_name).select("*").limit(1).execute()
+                    if sample_response.data is not None:
+                        print(f"DEBUG: Tabla común encontrada: '{table_name}'")
+                        print(f"DEBUG: Estructura: {sample_response.data[0] if sample_response.data else 'Sin datos'}")
+                except Exception as e:
+                    pass
         
         # Buscar logs en todas las tablas existentes
         for table_name in existing_tables:
