@@ -267,16 +267,25 @@ async def get_logs(
                     print(f"DEBUG: No hay coincidencia. Nuestros IDs: {api_key_ids[:3]}...")
             
             # Ahora hacer la consulta filtrada - excluir nulos en api_key_id (usando service role key)
+            print(f"DEBUG: Ejecutando consulta .in_() con {len(api_key_ids)} API key IDs")
+            print(f"DEBUG: Primeros 5 API key IDs: {api_key_ids[:5]}")
+            
+            # Primero, intentar sin el filtro .not_.is_() para ver si hay logs
+            logs_response_simple = supabase_service.table("backend_logs").select("*").in_("api_key_id", api_key_ids).execute()
+            print(f"DEBUG: Respuesta de consulta simple (sin excluir nulos): {len(logs_response_simple.data)} logs")
+            
+            # Luego con el filtro completo
             logs_response = supabase_service.table("backend_logs").select("*").in_("api_key_id", api_key_ids).not_.is_("api_key_id", "null").execute()
-            print(f"DEBUG: Respuesta de consulta filtrada (excluyendo nulos): {logs_response}")
+            print(f"DEBUG: Respuesta de consulta filtrada (excluyendo nulos): {len(logs_response.data)} logs")
+            print(f"DEBUG: Respuesta completa: {logs_response}")
             
             if logs_response.data:
-                # Filtrar adicionalmente por si acaso hay nulos que pasaron
-                valid_logs = [log for log in logs_response.data if log.get("api_key_id") and log.get("api_key_id").strip()]
-                logs_data.extend(valid_logs)
-                print(f"DEBUG: Encontrados {len(valid_logs)} logs válidos de {len(logs_response.data)} totales en backend_logs")
-                if valid_logs:
-                    print(f"DEBUG: Estructura del primer log válido: {valid_logs[0]}")
+                # Los datos ya vienen filtrados por la consulta, no necesitamos filtrar adicionalmente
+                logs_data.extend(logs_response.data)
+                print(f"DEBUG: Encontrados {len(logs_response.data)} logs en backend_logs")
+                print(f"DEBUG: API key IDs encontrados: {set(log.get('api_key_id') for log in logs_response.data)}")
+                if logs_response.data:
+                    print(f"DEBUG: Estructura del primer log: {logs_response.data[0]}")
             else:
                 print(f"DEBUG: No se encontraron logs en backend_logs para los API key IDs: {api_key_ids}")
                 
