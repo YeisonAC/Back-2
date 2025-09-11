@@ -156,12 +156,28 @@ async def get_logs(
         # Intentar diferentes tablas de logs
         logs_data = []
         
+        # Verificar si existen logs sin filtrar primero
+        try:
+            all_logs_response = supabase.table("logs").select("*").limit(5).execute()
+            print(f"DEBUG: Muestra de logs en tabla 'logs' (sin filtrar): {all_logs_response.data}")
+        except Exception as e:
+            print(f"DEBUG: Error consultando muestra de tabla 'logs': {str(e)}")
+        
+        try:
+            all_debug_logs_response = supabase.table("debug_logs").select("*").limit(5).execute()
+            print(f"DEBUG: Muestra de debug_logs en tabla 'debug_logs' (sin filtrar): {all_debug_logs_response.data}")
+        except Exception as e:
+            print(f"DEBUG: Error consultando muestra de tabla 'debug_logs': {str(e)}")
+        
         # Intentar con tabla logs si existe
         try:
             logs_response = supabase.table("logs").select("*").in_("api_key_id", api_key_ids).execute()
             if logs_response.data:
                 logs_data.extend(logs_response.data)
-                print(f"DEBUG: Encontrados {len(logs_response.data)} logs en tabla 'logs'")
+                print(f"DEBUG: Encontrados {len(logs_response.data)} logs en tabla 'logs' para el usuario")
+                print(f"DEBUG: Estructura del primer log: {logs_response.data[0] if logs_response.data else 'No logs'}")
+            else:
+                print(f"DEBUG: No se encontraron logs en tabla 'logs' para los API key IDs: {api_key_ids}")
         except Exception as e:
             print(f"DEBUG: Error consultando tabla 'logs': {str(e)}")
         
@@ -170,7 +186,10 @@ async def get_logs(
             debug_logs_response = supabase.table("debug_logs").select("*").in_("api_key_id", api_key_ids).execute()
             if debug_logs_response.data:
                 logs_data.extend(debug_logs_response.data)
-                print(f"DEBUG: Encontrados {len(debug_logs_response.data)} logs en tabla 'debug_logs'")
+                print(f"DEBUG: Encontrados {len(debug_logs_response.data)} logs en tabla 'debug_logs' para el usuario")
+                print(f"DEBUG: Estructura del primer debug_log: {debug_logs_response.data[0] if debug_logs_response.data else 'No debug_logs'}")
+            else:
+                print(f"DEBUG: No se encontraron debug_logs en tabla 'debug_logs' para los API key IDs: {api_key_ids}")
         except Exception as e:
             print(f"DEBUG: Error consultando tabla 'debug_logs': {str(e)}")
         
