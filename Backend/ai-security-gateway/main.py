@@ -339,14 +339,33 @@ async def get_logs(
         log_items = []
         for log in logs_data:
             try:
+                # Convertir request_payload y response_payload de string a dict si es necesario
+                request_payload = log.get("request_payload", {})
+                response_payload = log.get("response_payload", {})
+                
+                # Si son strings, intentar convertirlos a diccionarios
+                if isinstance(request_payload, str):
+                    try:
+                        request_payload = json.loads(request_payload)
+                    except json.JSONDecodeError:
+                        # Si no es JSON válido, dejar como string o usar dict vacío
+                        request_payload = {}
+                        
+                if isinstance(response_payload, str):
+                    try:
+                        response_payload = json.loads(response_payload)
+                    except json.JSONDecodeError:
+                        # Si no es JSON válido, dejar como string o usar dict vacío
+                        response_payload = {}
+                
                 log_item = LogItem(
                     id=str(log.get("id", f"log-{current_user_id[:8]}-{len(log_items)}")),
                     api_key_id=str(log.get("api_key_id", "")),
                     endpoint=log.get("endpoint", "/api/unknown"),
                     status=log.get("status", "unknown"),
                     created_at=log.get("created_at", "2025-01-01T00:00:00Z"),
-                    request_payload=log.get("request_payload", {}),
-                    response_payload=log.get("response_payload", {})
+                    request_payload=request_payload,
+                    response_payload=response_payload
                 )
                 log_items.append(log_item)
             except Exception as e:
