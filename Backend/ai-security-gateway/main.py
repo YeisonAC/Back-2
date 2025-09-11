@@ -16,20 +16,26 @@ load_dotenv(dotenv_path=Path(__file__).with_name('.env'))
 
 # Configuración de Supabase
 supabase_url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
-supabase_key = os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
+supabase_anon_key = os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
+supabase_service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 supabase_available = False
 
 print(f"DEBUG: Supabase URL: {'***' + supabase_url[-20:] if supabase_url else 'NOT SET'}")
-print(f"DEBUG: Supabase Key: {'***' + supabase_key[-10:] if supabase_key else 'NOT SET'}")
+print(f"DEBUG: Supabase Anon Key: {'***' + supabase_anon_key[-10:] if supabase_anon_key else 'NOT SET'}")
+print(f"DEBUG: Supabase Service Key: {'***' + supabase_service_key[-10:] if supabase_service_key else 'NOT SET'}")
 
 # Verificar si Supabase está disponible
-if supabase_url and supabase_key:
+if supabase_url and supabase_anon_key:
     try:
         from supabase import create_client, Client
-        # Probar conexión
-        test_client = create_client(supabase_url, supabase_key)
+        # Inicializar cliente de Supabase (anon key para operaciones normales)
+        supabase: Client = create_client(supabase_url, supabase_anon_key)
+
+        # Inicializar cliente de Supabase con service role key para backend_logs
+        supabase_service: Client = create_client(supabase_url, supabase_service_key) if supabase_service_key else supabase
+
         supabase_available = True
-        print("DEBUG: Supabase connection successful")
+        print("DEBUG: Supabase clients initialized successfully")
     except Exception as e:
         print(f"DEBUG: Supabase connection failed: {str(e)}")
         supabase_available = False
@@ -188,9 +194,17 @@ async def get_logs(
         # Usar específicamente la tabla backend_logs que existe y contiene los campos necesarios
         print(f"DEBUG: Usando tabla backend_logs que contiene los campos request_payload y response_payload")
         
-        # Verificar que la tabla backend_logs existe y obtener estructura
+        # Verificar conexión y mostrar información de Supabase
         try:
-            sample_response = supabase.table("backend_logs").select("*").limit(1).execute()
+            print(f"DEBUG: Verificando conexión a Supabase...")
+            print(f"DEBUG: Supabase URL: {supabase.supabase_url if hasattr(supabase, 'supabase_url') else 'No disponible'}")
+            
+            # Intentar obtener información de la conexión
+            health_response = supabase.table("api_keys_public").select("count").limit(1).execute()
+            print(f"DEBUG: Conexión a Supabase OK - puede consultar api_keys_public")
+            
+            # Verificar que la tabla backend_logs existe y obtener estructura (usando service role key)
+            sample_response = supabase_service.table("backend_logs").select("*").limit(1).execute()
             if sample_response.data:
                 print(f"DEBUG: Tabla backend_logs existe y tiene datos")
                 print(f"DEBUG: Estructura del primer registro: {sample_response.data[0]}")
@@ -206,10 +220,29 @@ async def get_logs(
                     print(f"DEBUG: Campos faltantes: {missing_fields}")
                 else:
                     print(f"DEBUG: Todos los campos requeridos están disponibles")
+                    
+                # Verificar total de registros en backend_logs (usando service role key)
+                count_response = supabase_service.table("backend_logs").select("*", count="exact").execute()
+                if hasattr(count_response, 'count'):
+                    print(f"DEBUG: Total de registros en backend_logs: {count_response.count}")
+                else:
+                    print(f"DEBUG: No se pudo obtener el conteo total")
             else:
                 print(f"DEBUG: Tabla backend_logs existe pero no tiene datos")
+                
+                # Listar tablas disponibles para diagnóstico
+                try:
+                    print(f"DEBUG: Intentando listar tablas disponibles...")
+                    # Esto es un intento de diagnóstico, puede fallar dependiendo de los permisos
+                    tables_response = supabase.table("api_keys_public").select("*").limit(1).execute()
+                    print(f"DEBUG: Puede acceder a api_keys_public")
+                except Exception as table_e:
+                    print(f"DEBUG: Error al verificar tablas: {str(table_e)}")
+                    
         except Exception as e:
             print(f"DEBUG: Error consultando tabla backend_logs: {str(e)}")
+            print(f"DEBUG: Tipo de error: {type(e)}")
+            print(f"DEBUG: Esto sugiere que la tabla backend_logs no existe o no hay permisos")
             raise HTTPException(status_code=500, detail=f"Error accessing backend_logs table: {str(e)}")
         
         # Buscar logs en la tabla backend_logs para las API keys del usuario
@@ -217,8 +250,8 @@ async def get_logs(
             print(f"DEBUG: Ejecutando consulta con {len(api_key_ids)} API key IDs")
             print(f"DEBUG: API key IDs para consulta: {api_key_ids[:3]}...")  # Mostrar solo primeros 3
             
-            # Primero, verificar si hay logs en general
-            all_logs_response = supabase.table("backend_logs").select("*").limit(1).execute()
+            # Primero, verificar si hay logs en general (usando service role key)
+            all_logs_response = supabase_service.table("backend_logs").select("*").limit(1).execute()
             print(f"DEBUG: Hay logs en backend_logs: {len(all_logs_response.data) > 0}")
             
             if all_logs_response.data:
@@ -233,8 +266,8 @@ async def get_logs(
                 else:
                     print(f"DEBUG: No hay coincidencia. Nuestros IDs: {api_key_ids[:3]}...")
             
-            # Ahora hacer la consulta filtrada - excluir nulos en api_key_id
-            logs_response = supabase.table("backend_logs").select("*").in_("api_key_id", api_key_ids).not_.is_("api_key_id", "null").execute()
+            # Ahora hacer la consulta filtrada - excluir nulos en api_key_id (usando service role key)
+            logs_response = supabase_service.table("backend_logs").select("*").in_("api_key_id", api_key_ids).not_.is_("api_key_id", "null").execute()
             print(f"DEBUG: Respuesta de consulta filtrada (excluyendo nulos): {logs_response}")
             
             if logs_response.data:
@@ -249,12 +282,12 @@ async def get_logs(
                 
                 # Intentar con un solo API key ID para probar
                 if api_key_ids:
-                    test_response = supabase.table("backend_logs").select("*").eq("api_key_id", api_key_ids[0]).not_.is_("api_key_id", "null").execute()
+                    test_response = supabase_service.table("backend_logs").select("*").eq("api_key_id", api_key_ids[0]).not_.is_("api_key_id", "null").execute()
                     print(f"DEBUG: Prueba con primer API key ID ({api_key_ids[0]}): {len(test_response.data)} logs")
                     
                     # Probar específicamente con V3HkXnORegU que sabemos que funciona manualmente
                     if "V3HkXnORegU" in api_key_ids:
-                        manual_test_response = supabase.table("backend_logs").select("*").eq("api_key_id", "V3HkXnORegU").execute()
+                        manual_test_response = supabase_service.table("backend_logs").select("*").eq("api_key_id", "V3HkXnORegU").execute()
                         print(f"DEBUG: Prueba manual con V3HkXnORegU: {len(manual_test_response.data)} logs")
                         if manual_test_response.data:
                             print(f"DEBUG: Logs encontrados manualmente: {manual_test_response.data}")
@@ -267,7 +300,7 @@ async def get_logs(
                         print(f"DEBUG: V3HkXnORegU no está en la lista de API key IDs")
                     
                     # Si aún no hay resultados, mostrar logs con api_key_id nulo para comparar
-                    null_logs_response = supabase.table("backend_logs").select("*").is_("api_key_id", "null").limit(3).execute()
+                    null_logs_response = supabase_service.table("backend_logs").select("*").is_("api_key_id", "null").limit(3).execute()
                     if null_logs_response.data:
                         print(f"DEBUG: Muestra de logs con api_key_id nulo: {len(null_logs_response.data)} registros")
                         print(f"DEBUG: Estructura de log con api_key_id nulo: {null_logs_response.data[0]}")
