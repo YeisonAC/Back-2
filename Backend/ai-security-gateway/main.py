@@ -252,6 +252,20 @@ async def get_logs(
                     test_response = supabase.table("backend_logs").select("*").eq("api_key_id", api_key_ids[0]).not_.is_("api_key_id", "null").execute()
                     print(f"DEBUG: Prueba con primer API key ID ({api_key_ids[0]}): {len(test_response.data)} logs")
                     
+                    # Probar específicamente con V3HkXnORegU que sabemos que funciona manualmente
+                    if "V3HkXnORegU" in api_key_ids:
+                        manual_test_response = supabase.table("backend_logs").select("*").eq("api_key_id", "V3HkXnORegU").execute()
+                        print(f"DEBUG: Prueba manual con V3HkXnORegU: {len(manual_test_response.data)} logs")
+                        if manual_test_response.data:
+                            print(f"DEBUG: Logs encontrados manualmente: {manual_test_response.data}")
+                            # Si encontramos logs manualmente, agregarlos a la respuesta
+                            logs_data.extend(manual_test_response.data)
+                            print(f"DEBUG: Agregados {len(manual_test_response.data)} logs manualmente")
+                        else:
+                            print(f"DEBUG: ¡Inesperado! No se encontraron logs para V3HkXnORegU")
+                    else:
+                        print(f"DEBUG: V3HkXnORegU no está en la lista de API key IDs")
+                    
                     # Si aún no hay resultados, mostrar logs con api_key_id nulo para comparar
                     null_logs_response = supabase.table("backend_logs").select("*").is_("api_key_id", "null").limit(3).execute()
                     if null_logs_response.data:
