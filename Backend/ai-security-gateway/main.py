@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 from pathlib import Path
 from supabase import create_client, Client
+from dataclasses import dataclass
 
 # Importar funciones de API keys
 try:
@@ -25,8 +26,144 @@ except ImportError:
 load_dotenv(dotenv_path=Path(__file__).with_name('.env'))
 
 # Configuración de modelos Groq
-GROQ_CLASSIFIER_MODEL = os.getenv("GROQ_CLASSIFIER_MODEL", "openai/gpt-oss-20b")
-GROQ_COMPLETION_MODEL = os.getenv("GROQ_COMPLETION_MODEL", "openai/gpt-oss-20b")
+COMPLETION_MODEL = os.getenv("GROQ_COMPLETION_MODEL", "openai/gpt-oss-20b")
+CLASSIFIER_MODEL = os.getenv("GROQ_CLASSIFIER_MODEL", "openai/gpt-oss-20b")
+ENABLE_INTENT_LAYER = os.getenv("ENABLE_INTENT_LAYER", "true").lower() == "true"
+
+# Variables de entorno específicas por tier
+L1_MINI_COMPLETION_MODEL = os.getenv("L1_MINI_COMPLETION_MODEL", "l1-mini")
+L1_MINI_CLASSIFIER_MODEL = os.getenv("L1_MINI_CLASSIFIER_MODEL", "l1-mini")
+L1_MEDIUM_COMPLETION_MODEL = os.getenv("L1_MEDIUM_COMPLETION_MODEL", "l1-medium")
+L1_MEDIUM_CLASSIFIER_MODEL = os.getenv("L1_MEDIUM_CLASSIFIER_MODEL", "l1-mini")
+L1_PRO_COMPLETION_MODEL = os.getenv("L1_PRO_COMPLETION_MODEL", "l1-pro")
+L1_PRO_CLASSIFIER_MODEL = os.getenv("L1_PRO_CLASSIFIER_MODEL", "l1-mini")
+ML1_COMPLETION_MODEL = os.getenv("ML1_COMPLETION_MODEL", "ml1")
+ML1_CLASSIFIER_MODEL = os.getenv("ML1_CLASSIFIER_MODEL", "l1-mini")
+
+@dataclass
+class TierConfig:
+    name: str
+    max_context_tokens: int
+    max_output_tokens: int
+    completion_model: str
+    completion_temperature: float
+    completion_top_p: float
+    classifier_model: str
+    classifier_temperature: float
+    classifier_max_tokens: int
+    classifier_retries: int
+    enable_intent_layer: bool
+
+
+def _env_or(default: str, env_var: str) -> str:
+    """Helper para obtener variable de entorno o usar default"""
+    return os.getenv(env_var, default)
+
+
+TIER_CONFIGS: dict[str, TierConfig] = {
+    "L1-mini": TierConfig(
+        name="L1-mini",
+        max_context_tokens=4000,
+        max_output_tokens=512,
+        completion_model=_env_or(COMPLETION_MODEL, "L1_MINI_COMPLETION_MODEL"),
+        completion_temperature=0.7,
+        completion_top_p=1.0,
+        classifier_model=_env_or(CLASSIFIER_MODEL, "L1_MINI_CLASSIFIER_MODEL"),
+        classifier_temperature=0.0,
+        classifier_max_tokens=256,
+        classifier_retries=0,
+        enable_intent_layer=ENABLE_INTENT_LAYER,
+    ),
+    "L1-medium": TierConfig(
+        name="L1-medium",
+        max_context_tokens=16000,
+        max_output_tokens=1024,
+        completion_model=_env_or(COMPLETION_MODEL, "L1_MEDIUM_COMPLETION_MODEL"),
+        completion_temperature=0.6,
+        completion_top_p=0.95,
+        classifier_model=_env_or(CLASSIFIER_MODEL, "L1_MEDIUM_CLASSIFIER_MODEL"),
+        classifier_temperature=0.0,
+        classifier_max_tokens=384,
+        classifier_retries=1,
+        enable_intent_layer=True,
+    ),
+    "L1-pro": TierConfig(
+        name="L1-pro",
+        max_context_tokens=64000,
+        max_output_tokens=2048,
+        completion_model=_env_or(COMPLETION_MODEL, "L1_PRO_COMPLETION_MODEL"),
+        completion_temperature=0.4,
+        completion_top_p=0.9,
+        classifier_model=_env_or(CLASSIFIER_MODEL, "L1_PRO_CLASSIFIER_MODEL"),
+        classifier_temperature=0.0,
+        classifier_max_tokens=512,
+        classifier_retries=2,
+        enable_intent_layer=True,
+    ),
+    "ML1": TierConfig(
+        name="ML1",
+        max_context_tokens=16000,
+        max_output_tokens=1024,
+        completion_model=_env_or(COMPLETION_MODEL, "ML1_COMPLETION_MODEL"),
+        completion_temperature=0.2,
+        completion_top_p=0.9,
+        classifier_model=_env_or(CLASSIFIER_MODEL, "ML1_CLASSIFIER_MODEL"),
+        classifier_temperature=0.0,
+        classifier_max_tokens=256,
+        classifier_retries=0,
+        enable_intent_layer=False,
+    ),
+}
+
+
+def _normalize_tier_name(raw: Optional[str]) -> str:
+    if not raw:
+        return "L1-mini"
+    v = raw.strip().lower()
+    if v in {"mini", "l1", "l1-mini", "l1_mini"}:
+        return "L1-mini"
+    if v in {"medium", "mid", "l1-medium", "l1_medium"}:
+        return "L1-medium"
+    if v in {"pro", "l1-pro", "l1_pro"}:
+        return "L1-pro"
+    if v in {"ml1", "multi-layer", "multi_layer"}:
+        return "ML1"
+    return "L1-mini"
+
+
+def _select_tier(request: Request) -> TierConfig:
+    # Prioridad: Header > query param > default
+    raw = request.headers.get("X-Layer") or request.query_params.get("layer")
+    name = _normalize_tier_name(raw)
+    return TIER_CONFIGS.get(name, TIER_CONFIGS["L1-mini"])
+
+
+def _estimate_tokens(text: str) -> int:
+    # Aproximación 1 token ~ 4 chars
+    return max(1, len(text) // 4)
+
+
+def _cap_messages_to_context(messages: list[dict], max_context_tokens: int) -> list[dict]:
+    # Conserva desde el final (más recientes) y trunca si excede
+    kept: list[dict] = []
+    total = 0
+    for msg in reversed(messages):
+        content = str(msg.get("content", ""))
+        t = _estimate_tokens(content)
+        if total + t <= max_context_tokens:
+            kept.append(msg)
+            total += t
+        else:
+            # Intentar truncar este mensaje si nada se ha agregado aún
+            if t > 0 and not kept and max_context_tokens > 0:
+                # Mantener solo la cola del contenido que quepa
+                approx_chars = max_context_tokens * 4
+                msg_copy = dict(msg)
+                msg_copy["content"] = content[-approx_chars:]
+                kept.append(msg_copy)
+            break
+    kept.reverse()
+    return kept
 
 # Configuración de Supabase
 supabase_url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
@@ -204,27 +341,7 @@ def _build_forwarded_ip_headers(request: Request, client_ip: str) -> Dict[str, s
     }
     return headers
 
-def _cap_messages_to_context(messages: List[Dict], max_context_tokens: int) -> List[Dict]:
-    """Limitar mensajes al contexto máximo"""
-    # Implementación simple - en producción debería calcular tokens reales
-    if len(messages) > 10:  # Limitar a 10 mensajes por ahora
-        return messages[-10:]
-    return messages
 
-def _select_tier(request: Request):
-    """Seleccionar tier basado en API key o headers"""
-    # Implementación simple - siempre usar tier básico por ahora
-    class Tier:
-        def __init__(self):
-            self.name = "basic"
-            self.completion_model = GROQ_COMPLETION_MODEL
-            self.max_output_tokens = 4096
-            self.completion_temperature = 0.7
-            self.completion_top_p = 0.9
-            self.max_context_tokens = 8192
-            self.enable_intent_layer = True
-    
-    return Tier()
 
 def classify_intent(request: Request, content: str, client_ip: str, tier) -> Optional[Dict]:
     """Clasificar intención del usuario"""
