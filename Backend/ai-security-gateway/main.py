@@ -1,12 +1,14 @@
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import os
 import json
 import base64
 import ast
+import requests
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Union, Set
 import http
 from dotenv import load_dotenv
 from pathlib import Path
@@ -14,9 +16,9 @@ from supabase import create_client, Client
 
 # Importar funciones de API keys
 try:
-    from .api_keys import create_api_key, list_api_keys, revoke_api_key, update_api_key, delete_api_key, get_api_key_meta
+    from .api_keys import create_api_key, list_api_keys, revoke_api_key, update_api_key, delete_api_key, get_api_key_meta, parse_full_key
 except ImportError:
-    from api_keys import create_api_key, list_api_keys, revoke_api_key, update_api_key, delete_api_key, get_api_key_meta
+    from api_keys import create_api_key, list_api_keys, revoke_api_key, update_api_key, delete_api_key, get_api_key_meta, parse_full_key
 
 # Cargar variables de entorno
 load_dotenv(dotenv_path=Path(__file__).with_name('.env'))
@@ -123,6 +125,23 @@ class APIKeyMetaResponse(BaseModel):
     is_active: bool
     owner_user_id: Optional[str] = None
 
+# Modelos para Chat Completions
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatCompletionRequest(BaseModel):
+    messages: List[ChatMessage]
+    model: Optional[str] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    max_tokens: Optional[int] = None
+    stream: Optional[bool] = False
+
+# Constantes para el servicio
+SERVICE_NAME = "EONS API"
+GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
+
 # Seguridad básica
 security = HTTPBearer()
 
@@ -151,6 +170,91 @@ def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depends(secu
         return user_id
     except Exception as e:
         raise HTTPException(status_code=401, detail=f"Token inválido: {str(e)}")
+
+# Funciones de utilidad para chat completions
+def get_client_ip(request: Request) -> str:
+    """Obtener IP del cliente"""
+    x_forwarded_for = request.headers.get("x-forwarded-for")
+    if x_forwarded_for:
+        return x_forwarded_for.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+def _build_forwarded_ip_headers(request: Request, client_ip: str) -> Dict[str, str]:
+    """Construir headers con IP forward"""
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {os.getenv('GROQ_API_KEY', '')}",
+        "X-Forwarded-For": client_ip,
+    }
+    return headers
+
+def _cap_messages_to_context(messages: List[Dict], max_context_tokens: int) -> List[Dict]:
+    """Limitar mensajes al contexto máximo"""
+    # Implementación simple - en producción debería calcular tokens reales
+    if len(messages) > 10:  # Limitar a 10 mensajes por ahora
+        return messages[-10:]
+    return messages
+
+def _select_tier(request: Request):
+    """Seleccionar tier basado en API key o headers"""
+    # Implementación simple - siempre usar tier básico por ahora
+    class Tier:
+        def __init__(self):
+            self.name = "basic"
+            self.completion_model = "llama3-8b-8192"
+            self.max_output_tokens = 4096
+            self.completion_temperature = 0.7
+            self.completion_top_p = 0.9
+            self.max_context_tokens = 8192
+            self.enable_intent_layer = True
+    
+    return Tier()
+
+def classify_intent(request: Request, content: str, client_ip: str, tier) -> Optional[Dict]:
+    """Clasificar intención del usuario"""
+    # Implementación simple - siempre retornar None por ahora
+    return None
+
+def derive_labels_from_intent(intent: Dict) -> Set[str]:
+    """Derivar etiquetas de seguridad desde intención"""
+    return set()
+
+def derive_labels_from_flags(flags: List[str]) -> Set[str]:
+    """Derivar etiquetas de seguridad desde flags"""
+    return set(flags)
+
+def pick_primary_label(labels: Set[str]) -> Optional[str]:
+    """Seleccionar etiqueta primaria"""
+    return next(iter(labels)) if labels else None
+
+def _normalize_tier_name(tier_name: str) -> str:
+    """Normalizar nombre de tier"""
+    return tier_name.lower()
+
+def log_interaction(**kwargs):
+    """Registrar interacción en logs"""
+    # Implementación simple - imprimir en consola por ahora
+    print(f"LOG: {kwargs}")
+
+# Clase Firewall simplificada
+class SimpleFirewall:
+    def inspect_request(self, user_id: str, prompt: str, system_purpose: str):
+        class InspectionResult:
+            def __init__(self):
+                self.flags = []
+                self.decision = "ALLOW"
+                self.threat_score = 0
+        return InspectionResult()
+    
+    def inspect_response(self, content: str):
+        class ResponseInspection:
+            def __init__(self):
+                self.flags = []
+                self.redacted_text = content
+        return ResponseInspection()
+
+# Instancia global del firewall
+firewall = SimpleFirewall()
 
 # Endpoints básicos
 @app.get("/")
@@ -471,6 +575,293 @@ async def get_logs(
         raise HTTPException(status_code=500, detail=f"Error getting logs: {str(e)}")
 
 
+# -------- Endpoint Proxy: Chat Completions --------
+@app.post("/v1/chat/completions")
+async def proxy_chat_completions(request: Request):
+    request_body = await request.json()
+    
+    try:
+        chat_request = ChatCompletionRequest(**request_body)
+    except Exception as e:
+        try:
+            log_interaction(
+                endpoint="/v1/chat/completions",
+                request_payload=request_body if isinstance(request_body, dict) else {"raw": str(request_body)},
+                response_payload={"error": f"Error de validación: {str(e)}"},
+                status="error",
+                user_ip=get_client_ip(request),
+                layer=_normalize_tier_name(request.headers.get("X-Layer") or request.query_params.get("layer")),
+                blocked_status="no blocked",
+                reason=f"validation_error: {str(e)}",
+                api_key_id=getattr(request.state, "api_key_id", None),
+                api_key=getattr(request.state, "api_key", None),
+            )
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail=f"Error de validación: {str(e)}")
+    
+    # Selección de nivel
+    tier = _select_tier(request)
+
+    # Obtener IP del cliente
+    client_ip = get_client_ip(request)
+
+    print(f"INFO: Incoming prompt ip={client_ip} tier={tier.name} enforced_model={tier.completion_model}")
+
+    # Metadatos opcionales de seguridad
+    user_id = request.headers.get("X-User-Id", "anonymous")
+    system_purpose = request.headers.get("X-System-Purpose", "general")
+
+    # Detección y acumulación de etiquetas
+    security_labels: Set[str] = set()
+
+    # Primera capa: clasificación de intención por LLM + firewall tradicional
+    detected_intents: list[dict] = []
+    for msg in chat_request.messages:
+        if msg.role != 'user':
+            continue
+        intent = classify_intent(request, msg.content, client_ip, tier)
+        if intent:
+            detected_intents.append(intent)
+            security_labels |= derive_labels_from_intent(intent)
+            print(f"INFO: Intent classifier -> {intent} ip={client_ip} tier={tier.name}")
+            if intent.get("is_malicious") is True:
+                primary = pick_primary_label(security_labels)
+                try:
+                    log_interaction(
+                        endpoint="/v1/chat/completions",
+                        request_payload=request_body if isinstance(request_body, dict) else {"raw": str(request_body)},
+                        response_payload={
+                            "error": "Blocked by intent classifier",
+                            "intent": intent,
+                            "tier": tier.name,
+                            "security_labels": sorted(list(security_labels)),
+                            "primary_security_label": primary,
+                        },
+                        status="blocked",
+                        user_ip=client_ip,
+                        layer=tier.name,
+                        blocked_status="blocked",
+                        reason=intent.get("reason") or "intent_classifier_malicious",
+                        api_key_id=getattr(request.state, "api_key_id", None),
+                        api_key=getattr(request.state, "api_key", None),
+                    )
+                except Exception:
+                    pass
+                return JSONResponse(status_code=403, content={
+                    "error": "Blocked by intent classifier",
+                    "intent": intent,
+                    "tier": tier.name,
+                    "security_labels": sorted(list(security_labels)),
+                    "primary_security_label": primary,
+                })
+        insp = firewall.inspect_request(user_id=user_id, prompt=msg.content, system_purpose=system_purpose)
+        if insp.flags:
+            security_labels |= derive_labels_from_flags(insp.flags)
+        if insp.decision == "BLOCK":
+            print(f"ALERTA: Firewall bloqueó la solicitud. ip={client_ip} score={insp.threat_score} flags={insp.flags}")
+            primary = pick_primary_label(security_labels)
+            try:
+                log_interaction(
+                    endpoint="/v1/chat/completions",
+                    request_payload=request_body if isinstance(request_body, dict) else {"raw": str(request_body)},
+                    response_payload={
+                        "error": "Security policy violation detected by firewall",
+                        "threat_score": insp.threat_score,
+                        "flags": insp.flags,
+                        "tier": tier.name,
+                        "security_labels": sorted(list(security_labels)),
+                        "primary_security_label": primary,
+                    },
+                    status="blocked",
+                    user_ip=client_ip,
+                    layer=tier.name,
+                    blocked_status="blocked",
+                    reason=f"firewall_flags: {', '.join(insp.flags) if insp.flags else 'BLOCK'}",
+                    api_key_id=getattr(request.state, "api_key_id", None),
+                    api_key=getattr(request.state, "api_key", None),
+                )
+            except Exception:
+                pass
+            return JSONResponse(status_code=403, content={
+                "error": "Security policy violation detected by firewall",
+                "threat_score": insp.threat_score,
+                "flags": insp.flags,
+                "tier": tier.name,
+                "security_labels": sorted(list(security_labels)),
+                "primary_security_label": primary,
+            })
+
+    # Preparar la petición para Groq
+    headers = _build_forwarded_ip_headers(request, client_ip)
+    
+    # Inyectar un mensaje de sistema con el label de intención (último) si existe
+    forward_body = request_body.copy()
+
+    # Selección de modelo por nivel
+    forward_body["model"] = tier.completion_model
+
+    # Respetar límites de salida del nivel
+    try:
+        user_max_tokens = int(forward_body.get("max_tokens")) if forward_body.get("max_tokens") is not None else None
+    except Exception:
+        user_max_tokens = None
+    forward_body["max_tokens"] = min(user_max_tokens, tier.max_output_tokens) if user_max_tokens else tier.max_output_tokens
+
+    # Aplicar temperatura/top_p del nivel salvo override explícito
+    if "temperature" not in forward_body:
+        forward_body["temperature"] = tier.completion_temperature
+    if "top_p" not in forward_body:
+        forward_body["top_p"] = tier.completion_top_p
+
+    try:
+        # Copiar mensajes de forma segura
+        orig_messages = forward_body.get("messages", [])
+        capped_messages = _cap_messages_to_context(orig_messages, tier.max_context_tokens)
+        if detected_intents:
+            last_intent = detected_intents[-1]
+            system_intent_note = {
+                "role": "system",
+                "content": (
+                    "Security Note: intent_label="
+                    + str(last_intent.get("intent_label", "unknown"))
+                ),
+            }
+            forward_body["messages"] = [system_intent_note] + capped_messages
+        else:
+            forward_body["messages"] = capped_messages
+    except Exception:
+        forward_body["messages"] = request_body.get("messages", [])
+
+    try:
+        response = requests.post(GROQ_CHAT_URL, headers=headers, json=forward_body, timeout=60)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Inspección y posible redacción de la respuesta del modelo
+            try:
+                content_text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            except Exception:
+                content_text = ""
+            resp_insp = firewall.inspect_response(content_text)
+            if resp_insp.flags:
+                print(f"ALERTA: Firewall detectó problemas en la respuesta. ip={client_ip} flags={resp_insp.flags}")
+                if isinstance(data.get("choices"), list) and data["choices"]:
+                    if "message" in data["choices"][0]:
+                        data["choices"][0]["message"]["content"] = resp_insp.redacted_text
+                data["firewall"] = {"flags": resp_insp.flags, "redacted": resp_insp.redacted_text != content_text}
+                security_labels |= derive_labels_from_flags(resp_insp.flags)
+            else:
+                data.setdefault("firewall", {"flags": [], "redacted": False})
+
+            # Adjuntar metadata de intención y nivel
+            if detected_intents:
+                data["intent_layer"] = {
+                    "enabled": True,
+                    "last_intent": detected_intents[-1],
+                }
+                security_labels |= derive_labels_from_intent(detected_intents[-1])
+            else:
+                data.setdefault("intent_layer", {"enabled": tier.enable_intent_layer, "last_intent": None})
+
+            data["tier"] = tier.name
+            # Añadir etiquetas de seguridad
+            primary = pick_primary_label(security_labels)
+            data["security_labels"] = sorted(list(security_labels))
+            data["primary_security_label"] = primary
+
+            try:
+                log_interaction(
+                    endpoint="/v1/chat/completions",
+                    request_payload=forward_body,
+                    response_payload=data,
+                    status="success",
+                    user_ip=client_ip,
+                    layer=tier.name,
+                    blocked_status="no blocked",
+                    reason=None,
+                    api_key_id=getattr(request.state, "api_key_id", None),
+                    api_key=getattr(request.state, "api_key", None),
+                    prompt_tokens=(data.get("usage", {}) or {}).get("prompt_tokens"),
+                    completion_tokens=(data.get("usage", {}) or {}).get("completion_tokens"),
+                    total_tokens=(data.get("usage", {}) or {}).get("total_tokens"),
+                )
+            except Exception:
+                pass
+
+            return JSONResponse(content=data, status_code=response.status_code)
+        else:
+            print(f"ERROR: Error de Groq API: {response.status_code} - {response.text} ip={client_ip}")
+            primary = pick_primary_label(security_labels)
+            try:
+                log_interaction(
+                    endpoint="/v1/chat/completions",
+                    request_payload=forward_body,
+                    response_payload={
+                        "error": f"Groq API error: {response.text}",
+                        "tier": tier.name,
+                        "security_labels": sorted(list(security_labels)),
+                        "primary_security_label": primary,
+                    },
+                    status="error",
+                    user_ip=client_ip,
+                    layer=tier.name,
+                    blocked_status="no blocked",
+                    reason=f"groq_api_error: {response.status_code}",
+                    api_key_id=getattr(request.state, "api_key_id", None),
+                    api_key=getattr(request.state, "api_key", None),
+                )
+            except Exception:
+                pass
+            return JSONResponse(
+                content={
+                    "error": f"Groq API error: {response.text}",
+                    "tier": tier.name,
+                    "security_labels": sorted(list(security_labels)),
+                    "primary_security_label": primary,
+                }, 
+                status_code=response.status_code
+            )
+            
+    except requests.exceptions.Timeout:
+        print(f"ERROR: Timeout en la petición a Groq ip={client_ip}")
+        try:
+            log_interaction(
+                endpoint="/v1/chat/completions",
+                request_payload=forward_body if isinstance(locals().get("forward_body"), dict) else {},
+                response_payload={"error": "Request timeout to Groq API"},
+                status="error",
+                user_ip=client_ip,
+                layer=tier.name,
+                blocked_status="no blocked",
+                reason="timeout",
+                api_key_id=getattr(request.state, "api_key_id", None),
+                api_key=getattr(request.state, "api_key", None),
+            )
+        except Exception:
+            pass
+        raise HTTPException(status_code=504, detail="Request timeout to Groq API")
+    
+    except requests.exceptions.RequestException as e:
+        print(f"ERROR: Error en la petición a Groq: {str(e)} ip={client_ip}")
+        try:
+            log_interaction(
+                endpoint="/v1/chat/completions",
+                request_payload=forward_body if isinstance(locals().get("forward_body"), dict) else {},
+                response_payload={"error": f"Error connecting to Groq API: {str(e)}"},
+                status="error",
+                user_ip=client_ip,
+                layer=tier.name,
+                blocked_status="no blocked",
+                reason=f"request_exception: {str(e)}",
+                api_key_id=getattr(request.state, "api_key_id", None),
+                api_key=getattr(request.state, "api_key", None),
+            )
+        except Exception:
+            pass
+        raise HTTPException(status_code=502, detail=f"Error connecting to Groq API: {str(e)}")
+
+
 # -------- Admin: Gestión de API Keys --------
 def _is_admin(request: Request) -> bool:
     """Verifica si la request es de un admin (por ahora, siempre true para desarrollo)"""
@@ -485,21 +876,43 @@ async def admin_create_api_key(request: Request, body: CreateKeyRequest):
         raise HTTPException(status_code=403, detail="Admin access required")
     
     try:
-        result = create_api_key(
+        full_key = create_api_key(
             name=body.name,
             rate_limit=body.rate_limit,
             owner_user_id=body.user_id
         )
         
+        if not full_key:
+            raise HTTPException(status_code=500, detail="Error creating API key: No key returned")
+        
+        # Parsear la clave para obtener el key_id
+        key_id, _ = parse_full_key(full_key)
+        
+        # Obtener metadatos de la clave recién creada
+        key_meta = get_api_key_meta(key_id)
+        
+        if not key_meta:
+            # Fallback si no se pueden obtener metadatos
+            return APIKeyResponse(
+                id=key_id,
+                name=body.name,
+                key_id=key_id,
+                full_key=full_key,
+                rate_limit=body.rate_limit,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                is_active=True,
+                owner_user_id=body.user_id
+            )
+        
         return APIKeyResponse(
-            id=result.get("id", ""),
-            name=result.get("name", ""),
-            key_id=result.get("key_id", ""),
-            full_key=result.get("full_key", ""),
-            rate_limit=result.get("rate_limit"),
-            created_at=result.get("created_at", ""),
-            is_active=result.get("is_active", True),
-            owner_user_id=result.get("owner_user_id")
+            id=key_meta.get("key_id", key_id),
+            name=key_meta.get("name", body.name),
+            key_id=key_meta.get("key_id", key_id),
+            full_key=full_key,
+            rate_limit=key_meta.get("rate_limit"),
+            created_at=key_meta.get("created_at", datetime.now(timezone.utc).isoformat()),
+            is_active=key_meta.get("active", True),
+            owner_user_id=key_meta.get("owner_user_id")
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error creating API key: {str(e)}")
@@ -592,21 +1005,43 @@ async def mgmt_create_key(request: Request, body: MgmtCreateKeyRequest):
     try:
         user_id = _require_user_id(request)
         
-        result = create_api_key(
+        full_key = create_api_key(
             name=body.name,
             rate_limit=body.rate_limit,
             owner_user_id=user_id
         )
         
+        if not full_key:
+            raise HTTPException(status_code=500, detail="Error creating API key: No key returned")
+        
+        # Parsear la clave para obtener el key_id
+        key_id, _ = parse_full_key(full_key)
+        
+        # Obtener metadatos de la clave recién creada
+        key_meta = get_api_key_meta(key_id)
+        
+        if not key_meta:
+            # Fallback si no se pueden obtener metadatos
+            return APIKeyResponse(
+                id=key_id,
+                name=body.name,
+                key_id=key_id,
+                full_key=full_key,
+                rate_limit=body.rate_limit,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                is_active=True,
+                owner_user_id=user_id
+            )
+        
         return APIKeyResponse(
-            id=result.get("id", ""),
-            name=result.get("name", ""),
-            key_id=result.get("key_id", ""),
-            full_key=result.get("full_key", ""),
-            rate_limit=result.get("rate_limit"),
-            created_at=result.get("created_at", ""),
-            is_active=result.get("is_active", True),
-            owner_user_id=result.get("owner_user_id")
+            id=key_meta.get("key_id", key_id),
+            name=key_meta.get("name", body.name),
+            key_id=key_meta.get("key_id", key_id),
+            full_key=full_key,
+            rate_limit=key_meta.get("rate_limit"),
+            created_at=key_meta.get("created_at", datetime.now(timezone.utc).isoformat()),
+            is_active=key_meta.get("active", True),
+            owner_user_id=key_meta.get("owner_user_id")
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error creating API key: {str(e)}")
