@@ -95,7 +95,8 @@ def create_api_key(
         # Guardar un prefijo seguro (no revela el secreto completo)
         "prefix": secret[:8],
         # Propietario de la clave para filtrado por usuario en UI
-        "owner_user_id": owner_user_id,
+        # Usar user_id en lugar de owner_user_id para coincidir con el esquema
+        "user_id": owner_user_id,
     }
     sb.table(API_KEYS_TABLE).insert(payload).execute()
     return full_key
@@ -141,7 +142,7 @@ def get_api_key_meta(key_id: str) -> Optional[dict]:
     try:
         res = (
             sb.table(API_KEYS_TABLE)
-            .select("key_id, name, active, rate_limit, created_at, last_used_at, owner_user_id")
+            .select("key_id, name, active, rate_limit, created_at, last_used_at, user_id")
             .eq("key_id", key_id)
             .limit(1)
             .execute()
@@ -179,11 +180,11 @@ def list_api_keys(limit: int = 100, offset: int = 0, owner_user_id: Optional[str
     try:
         q = (
             sb.table(API_KEYS_TABLE)
-            .select("key_id, name, active, rate_limit, created_at, last_used_at, prefix, owner_user_id")
+            .select("key_id, name, active, rate_limit, created_at, last_used_at, prefix, user_id")
             .order("created_at", desc=True)
         )
         if owner_user_id:
-            q = q.eq("owner_user_id", owner_user_id)
+            q = q.eq("user_id", owner_user_id)
         res = q.range(offset, offset + max(0, limit - 1)).execute()
         return getattr(res, 'data', None) or []
     except Exception:

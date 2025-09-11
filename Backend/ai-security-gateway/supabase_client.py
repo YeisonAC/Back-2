@@ -300,7 +300,7 @@ def get_api_key_meta(key_id: str) -> Optional[dict]:
         return None
         
     try:
-        res = sb.table(API_KEYS_TABLE).select("*").eq("key_id", key_id).limit(1).execute()
+        res = sb.table(API_KEYS_TABLE).select("key_id, name, active, rate_limit, created_at, last_used_at, user_id").eq("key_id", key_id).limit(1).execute()
         if res.data and len(res.data) > 0:
             return res.data[0]
         return None

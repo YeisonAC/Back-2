@@ -308,14 +308,17 @@ async def test_api_keys():
             "message": "API key creation test successful",
             "test_key_id": key_id,
             "key_meta_available": key_meta is not None,
+            "key_meta": key_meta,
             "supabase_connected": True
         }
         
     except Exception as e:
+        import traceback
         return {
             "error": f"Test failed: {str(e)}",
             "status": "error",
-            "exception_type": type(e).__name__
+            "exception_type": type(e).__name__,
+            "traceback": traceback.format_exc()
         }
 
 @app.get("/api/logs", response_model=LogsResponse)
@@ -982,7 +985,7 @@ async def admin_create_api_key(request: Request, body: CreateKeyRequest):
             rate_limit=key_meta.get("rate_limit"),
             created_at=key_meta.get("created_at", datetime.now(timezone.utc).isoformat()),
             is_active=key_meta.get("active", True),
-            owner_user_id=key_meta.get("owner_user_id")
+            owner_user_id=key_meta.get("user_id")
         )
     except HTTPException:
         # Re-lanzar HTTPException para mantener el status code correcto
@@ -1013,8 +1016,8 @@ async def admin_list_api_keys(request: Request, limit: int = 100, offset: int = 
                 key_id=key.get("key_id", ""),
                 rate_limit=key.get("rate_limit"),
                 created_at=key.get("created_at", ""),
-                is_active=key.get("is_active", True),
-                owner_user_id=key.get("owner_user_id")
+                is_active=key.get("active", True),
+                owner_user_id=key.get("user_id")
             ) for key in keys
         ]
     except Exception as e:
@@ -1050,8 +1053,8 @@ async def admin_update_api_key(request: Request, key_id: str, body: UpdateKeyReq
             key_id=key_meta.get("key_id", ""),
             rate_limit=key_meta.get("rate_limit"),
             created_at=key_meta.get("created_at", ""),
-            is_active=key_meta.get("is_active", True),
-            owner_user_id=key_meta.get("owner_user_id")
+            is_active=key_meta.get("active", True),
+            owner_user_id=key_meta.get("user_id")
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error updating API key: {str(e)}")
@@ -1138,7 +1141,7 @@ async def mgmt_create_key(request: Request, body: MgmtCreateKeyRequest):
             rate_limit=key_meta.get("rate_limit"),
             created_at=key_meta.get("created_at", datetime.now(timezone.utc).isoformat()),
             is_active=key_meta.get("active", True),
-            owner_user_id=key_meta.get("owner_user_id")
+            owner_user_id=key_meta.get("user_id")
         )
     except HTTPException:
         # Re-lanzar HTTPException para mantener el status code correcto
@@ -1168,8 +1171,8 @@ async def mgmt_list_keys(request: Request, limit: int = 100, offset: int = 0):
                 key_id=key.get("key_id", ""),
                 rate_limit=key.get("rate_limit"),
                 created_at=key.get("created_at", ""),
-                is_active=key.get("is_active", True),
-                owner_user_id=key.get("owner_user_id")
+                is_active=key.get("active", True),
+                owner_user_id=key.get("user_id")
             ) for key in keys
         ]
     except Exception as e:
@@ -1197,8 +1200,8 @@ async def mgmt_update_key(request: Request, key_id: str, body: MgmtUpdateKeyRequ
             key_id=key_meta.get("key_id", ""),
             rate_limit=key_meta.get("rate_limit"),
             created_at=key_meta.get("created_at", ""),
-            is_active=key_meta.get("is_active", True),
-            owner_user_id=key_meta.get("owner_user_id")
+            is_active=key_meta.get("active", True),
+            owner_user_id=key_meta.get("user_id")
         )
     except HTTPException:
         raise
