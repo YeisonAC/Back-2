@@ -24,6 +24,10 @@ except ImportError:
 # Cargar variables de entorno
 load_dotenv(dotenv_path=Path(__file__).with_name('.env'))
 
+# Configuración de modelos Groq
+GROQ_CLASSIFIER_MODEL = os.getenv("GROQ_CLASSIFIER_MODEL", "llama3-8b-8192")
+GROQ_COMPLETION_MODEL = os.getenv("GROQ_COMPLETION_MODEL", "llama3-8b-8192")
+
 # Configuración de Supabase
 supabase_url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
 supabase_anon_key = os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
@@ -202,7 +206,7 @@ def _select_tier(request: Request):
     class Tier:
         def __init__(self):
             self.name = "basic"
-            self.completion_model = "llama3-8b-8192"
+            self.completion_model = GROQ_COMPLETION_MODEL
             self.max_output_tokens = 4096
             self.completion_temperature = 0.7
             self.completion_top_p = 0.9
