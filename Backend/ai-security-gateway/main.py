@@ -25,8 +25,8 @@ except ImportError:
 load_dotenv(dotenv_path=Path(__file__).with_name('.env'))
 
 # Configuración de modelos Groq
-GROQ_CLASSIFIER_MODEL = os.getenv("GROQ_CLASSIFIER_MODEL", "openai-oss-8b")
-GROQ_COMPLETION_MODEL = os.getenv("GROQ_COMPLETION_MODEL", "openai-oss-8b")
+GROQ_CLASSIFIER_MODEL = os.getenv("GROQ_CLASSIFIER_MODEL", "openai/gpt-oss-20b")
+GROQ_COMPLETION_MODEL = os.getenv("GROQ_COMPLETION_MODEL", "openai/gpt-oss-20b")
 
 # Configuración de Supabase
 supabase_url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
