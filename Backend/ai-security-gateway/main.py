@@ -142,7 +142,7 @@ async def get_logs(
             print(f"DEBUG: Respuesta api_keys: {api_keys_response}")
         
         api_keys = api_keys_response.data if api_keys_response.data else []
-        api_key_ids = [key["id"] for key in api_keys] if api_keys else []
+        api_key_ids = [key["key_id"] for key in api_keys] if api_keys else []
         
         print(f"DEBUG: API keys encontradas: {len(api_keys)}, IDs: {api_key_ids}")
         
