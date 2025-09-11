@@ -239,8 +239,8 @@ async def get_logs(
             class DebugResponse(BaseModel):
                 data: List = []
                 total: int = 0
-                page: int = page
-                page_size: int = page_size
+                page: int = 1
+                page_size: int = 20
                 debug_info: dict = debug_info
             
             return DebugResponse()
