@@ -60,12 +60,20 @@ else:
 # Configuración básica
 app = FastAPI(title="EONS API - Minimal Version", version="1.0.0")
 
-# Función para obtener cliente de Supabase
+# Función para obtener cliente de Supabase (usando la función de supabase_client.py)
 def get_supabase() -> Client:
-    if not supabase_available:
-        raise Exception("Supabase not available")
-    from supabase import create_client, Client
-    return create_client(supabase_url, supabase_anon_key)
+    try:
+        from supabase_client import get_supabase as get_supabase_client
+        client = get_supabase_client()
+        if client is None:
+            raise Exception("Supabase not available")
+        return client
+    except ImportError:
+        # Fallback si no se puede importar supabase_client
+        if not supabase_available:
+            raise Exception("Supabase not available")
+        from supabase import create_client, Client
+        return create_client(supabase_url, supabase_anon_key)
 
 # Configuración CORS
 app.add_middleware(
@@ -269,6 +277,46 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "healthy", "version": "1.0.0"}
+
+@app.get("/api/test/keys")
+async def test_api_keys():
+    """Endpoint de prueba para verificar la funcionalidad de API keys"""
+    try:
+        # Probar la conectividad a Supabase
+        sb = get_supabase()
+        if sb is None:
+            return {"error": "Supabase not available", "status": "error"}
+        
+        # Probar crear una API key de prueba
+        test_key = create_api_key(
+            name="test-key",
+            rate_limit=1000,
+            owner_user_id="test-user"
+        )
+        
+        if test_key is None:
+            return {"error": "Failed to create test API key", "status": "error"}
+        
+        # Parsear la clave para obtener el key_id
+        key_id, _ = parse_full_key(test_key)
+        
+        # Obtener metadatos
+        key_meta = get_api_key_meta(key_id)
+        
+        return {
+            "status": "success",
+            "message": "API key creation test successful",
+            "test_key_id": key_id,
+            "key_meta_available": key_meta is not None,
+            "supabase_connected": True
+        }
+        
+    except Exception as e:
+        return {
+            "error": f"Test failed: {str(e)}",
+            "status": "error",
+            "exception_type": type(e).__name__
+        }
 
 @app.get("/api/logs", response_model=LogsResponse)
 async def get_logs(
@@ -881,6 +929,14 @@ async def admin_create_api_key(request: Request, body: CreateKeyRequest):
         raise HTTPException(status_code=403, detail="Admin access required")
     
     try:
+        # Verificar conectividad a Supabase primero
+        sb = get_supabase()
+        if sb is None:
+            raise HTTPException(
+                status_code=503, 
+                detail="Database service unavailable. Please check your Supabase configuration."
+            )
+        
         full_key = create_api_key(
             name=body.name,
             rate_limit=body.rate_limit,
@@ -888,10 +944,19 @@ async def admin_create_api_key(request: Request, body: CreateKeyRequest):
         )
         
         if not full_key:
-            raise HTTPException(status_code=500, detail="Error creating API key: No key returned")
+            raise HTTPException(
+                status_code=500, 
+                detail="Failed to create API key. Please try again or contact support."
+            )
         
         # Parsear la clave para obtener el key_id
         key_id, _ = parse_full_key(full_key)
+        
+        if not key_id:
+            raise HTTPException(
+                status_code=500, 
+                detail="Invalid API key format generated. Please try again."
+            )
         
         # Obtener metadatos de la clave recién creada
         key_meta = get_api_key_meta(key_id)
@@ -919,8 +984,18 @@ async def admin_create_api_key(request: Request, body: CreateKeyRequest):
             is_active=key_meta.get("active", True),
             owner_user_id=key_meta.get("owner_user_id")
         )
+    except HTTPException:
+        # Re-lanzar HTTPException para mantener el status code correcto
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error creating API key: {str(e)}")
+        # Log del error para debugging
+        print(f"ERROR: Unexpected error in admin_create_api_key: {str(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal server error: {str(e)}"
+        )
 
 @app.get("/api/admin/keys", response_model=List[APIKeyMetaResponse])
 async def admin_list_api_keys(request: Request, limit: int = 100, offset: int = 0, user_id: Optional[str] = None):
@@ -1010,6 +1085,14 @@ async def mgmt_create_key(request: Request, body: MgmtCreateKeyRequest):
     try:
         user_id = _require_user_id(request)
         
+        # Verificar conectividad a Supabase primero
+        sb = get_supabase()
+        if sb is None:
+            raise HTTPException(
+                status_code=503, 
+                detail="Database service unavailable. Please check your Supabase configuration."
+            )
+        
         full_key = create_api_key(
             name=body.name,
             rate_limit=body.rate_limit,
@@ -1017,10 +1100,19 @@ async def mgmt_create_key(request: Request, body: MgmtCreateKeyRequest):
         )
         
         if not full_key:
-            raise HTTPException(status_code=500, detail="Error creating API key: No key returned")
+            raise HTTPException(
+                status_code=500, 
+                detail="Failed to create API key. Please try again or contact support."
+            )
         
         # Parsear la clave para obtener el key_id
         key_id, _ = parse_full_key(full_key)
+        
+        if not key_id:
+            raise HTTPException(
+                status_code=500, 
+                detail="Invalid API key format generated. Please try again."
+            )
         
         # Obtener metadatos de la clave recién creada
         key_meta = get_api_key_meta(key_id)
@@ -1048,8 +1140,18 @@ async def mgmt_create_key(request: Request, body: MgmtCreateKeyRequest):
             is_active=key_meta.get("active", True),
             owner_user_id=key_meta.get("owner_user_id")
         )
+    except HTTPException:
+        # Re-lanzar HTTPException para mantener el status code correcto
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error creating API key: {str(e)}")
+        # Log del error para debugging
+        print(f"ERROR: Unexpected error in mgmt_create_key: {str(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal server error: {str(e)}"
+        )
 
 @app.get("/api/keys", response_model=List[APIKeyMetaResponse])
 async def mgmt_list_keys(request: Request, limit: int = 100, offset: int = 0):
