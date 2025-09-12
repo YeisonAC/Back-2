@@ -137,9 +137,12 @@ def _normalize_tier_name(raw: Optional[str]) -> str:
     return "L1-mini"
 
 
-def _select_tier(request: Request) -> TierConfig:
-    # Prioridad: Header > query param > default
-    raw = request.headers.get("X-Layer") or request.query_params.get("layer")
+def _select_tier(request: Request, request_body: dict = None) -> TierConfig:
+    # Prioridad: Request body model > Header > query param > default
+    if request_body and "model" in request_body:
+        raw = request_body["model"]
+    else:
+        raw = request.headers.get("X-Layer") or request.query_params.get("layer")
     name = _normalize_tier_name(raw)
     return TIER_CONFIGS.get(name, TIER_CONFIGS["L1-mini"])
 
@@ -1101,7 +1104,7 @@ async def proxy_chat_completions(request: Request, api_key_id: str = Depends(val
         raise HTTPException(status_code=400, detail=f"Error de validación: {str(e)}")
     
     # Selección de nivel
-    tier = _select_tier(request)
+    tier = _select_tier(request, request_body)
 
     # Obtener IP del cliente
     client_ip = get_client_ip(request)
@@ -1134,7 +1137,7 @@ async def proxy_chat_completions(request: Request, api_key_id: str = Depends(val
                         response_payload={
                             "error": "Blocked by intent classifier",
                             "intent": intent,
-                            "tier": tier.name,
+                            "model": tier.name,
                             "security_labels": sorted(list(security_labels)),
                             "primary_security_label": primary,
                         },
@@ -1151,7 +1154,7 @@ async def proxy_chat_completions(request: Request, api_key_id: str = Depends(val
                 return JSONResponse(status_code=403, content={
                     "error": "Blocked by intent classifier",
                     "intent": intent,
-                    "tier": tier.name,
+                    "model": tier.name,
                     "security_labels": sorted(list(security_labels)),
                     "primary_security_label": primary,
                 })
@@ -1169,7 +1172,6 @@ async def proxy_chat_completions(request: Request, api_key_id: str = Depends(val
                         "error": "Security policy violation detected by firewall",
                         "threat_score": insp.threat_score,
                         "flags": insp.flags,
-                        "tier": tier.name,
                         "security_labels": sorted(list(security_labels)),
                         "primary_security_label": primary,
                     },
@@ -1187,7 +1189,7 @@ async def proxy_chat_completions(request: Request, api_key_id: str = Depends(val
                 "error": "Security policy violation detected by firewall",
                 "threat_score": insp.threat_score,
                 "flags": insp.flags,
-                "tier": tier.name,
+                "model": tier.name,
                 "security_labels": sorted(list(security_labels)),
                 "primary_security_label": primary,
             })
@@ -1266,7 +1268,6 @@ async def proxy_chat_completions(request: Request, api_key_id: str = Depends(val
 
             # Reemplazar el modelo con el nombre del tier
             data["model"] = tier.name
-            data["tier"] = tier.name
             # Añadir etiquetas de seguridad
             primary = pick_primary_label(security_labels)
             data["security_labels"] = sorted(list(security_labels))
@@ -1301,7 +1302,7 @@ async def proxy_chat_completions(request: Request, api_key_id: str = Depends(val
                     request_payload=forward_body,
                     response_payload={
                         "error": f"Groq API error: {response.text}",
-                        "tier": tier.name,
+                        "model": tier.name,
                         "security_labels": sorted(list(security_labels)),
                         "primary_security_label": primary,
                     },
@@ -1318,7 +1319,7 @@ async def proxy_chat_completions(request: Request, api_key_id: str = Depends(val
             return JSONResponse(
                 content={
                     "error": f"Groq API error: {response.text}",
-                    "tier": tier.name,
+                    "model": tier.name,
                     "security_labels": sorted(list(security_labels)),
                     "primary_security_label": primary,
                 }, 
