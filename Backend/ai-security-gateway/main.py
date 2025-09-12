@@ -22,6 +22,12 @@ try:
 except ImportError:
     from api_keys import create_api_key, list_api_keys, revoke_api_key, update_api_key, delete_api_key, get_api_key_meta, parse_full_key
 
+# Importar función de logging
+try:
+    from .supabase_client import log_interaction
+except ImportError:
+    from supabase_client import log_interaction
+
 # Cargar variables de entorno
 load_dotenv(dotenv_path=Path(__file__).with_name('.env'))
 
