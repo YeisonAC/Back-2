@@ -503,8 +503,10 @@ async def debug_groq():
             "Authorization": f"Bearer {groq_api_key}",
         }
         
+        # Usar el modelo por defecto de la configuración
+        default_tier = TIER_CONFIGS["L1-mini"]
         test_payload = {
-            "model": "openai-oss-8b",
+            "model": default_tier.completion_model,
             "messages": [{"role": "user", "content": "Hello"}],
             "max_tokens": 10
         }
