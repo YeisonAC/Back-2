@@ -28,6 +28,12 @@ try:
 except ImportError:
     from supabase_client import log_interaction
 
+# Importar servicio de geolocalización
+try:
+    from .geolocation import geolocation_service
+except ImportError:
+    from geolocation import geolocation_service
+
 # Cargar variables de entorno
 load_dotenv(dotenv_path=Path(__file__).with_name('.env'))
 
@@ -281,8 +287,13 @@ class LogItem(BaseModel):
     endpoint: str
     status: str
     created_at: str
+    user_ip: Optional[str] = None
     request_payload: Optional[dict] = None
     response_payload: Optional[dict] = None
+    country_code: Optional[str] = None
+    country_name: Optional[str] = None
+    city: Optional[str] = None
+    region: Optional[str] = None
 
 class LogsResponse(BaseModel):
     data: List[LogItem]
@@ -381,6 +392,25 @@ def get_client_ip(request: Request) -> str:
     if x_forwarded_for:
         return x_forwarded_for.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
+
+def get_geolocation_info(ip_address: str) -> dict:
+    """Obtener información de geolocalización desde una dirección IP"""
+    try:
+        geo_info = geolocation_service.get_country_from_ip(ip_address)
+        return {
+            'country_code': geo_info.get('country_code'),
+            'country_name': geo_info.get('country_name'), 
+            'city': geo_info.get('city'),
+            'region': geo_info.get('region')
+        }
+    except Exception as e:
+        print(f"Error obteniendo geolocalización para IP {ip_address}: {str(e)}")
+        return {
+            'country_code': None,
+            'country_name': None,
+            'city': None,
+            'region': None
+        }
 
 def _build_forwarded_ip_headers(request: Request, client_ip: str) -> Dict[str, str]:
     """Construir headers con IP forward"""
@@ -1046,8 +1076,13 @@ async def get_logs(
                     endpoint=log.get("endpoint", "/api/unknown"),
                     status=log.get("status", "unknown"),
                     created_at=log.get("created_at", "2025-01-01T00:00:00Z"),
+                    user_ip=log.get("user_ip"),
                     request_payload=request_payload,
-                    response_payload=response_payload
+                    response_payload=response_payload,
+                    country_code=log.get("country_code"),
+                    country_name=log.get("country_name"),
+                    city=log.get("city"),
+                    region=log.get("region")
                 )
                 log_items.append(log_item)
             except Exception as e:
@@ -1097,18 +1132,24 @@ async def proxy_chat_completions(request: Request, api_key_id: str = Depends(val
     try:
         chat_request = ChatCompletionRequest(**request_body)
     except Exception as e:
+        client_ip = get_client_ip(request)
+        geo_info = get_geolocation_info(client_ip)
         try:
             log_interaction(
                 endpoint="/v1/chat/completions",
                 request_payload=request_body if isinstance(request_body, dict) else {"raw": str(request_body)},
                 response_payload={"error": f"Error de validación: {str(e)}"},
                 status="error",
-                user_ip=get_client_ip(request),
+                user_ip=client_ip,
                 layer=_normalize_tier_name(request.headers.get("X-Layer") or request.query_params.get("layer")),
                 blocked_status="no blocked",
                 reason=f"validation_error: {str(e)}",
                 api_key_id=getattr(request.state, "api_key_id", None),
                 api_key=getattr(request.state, "api_key", None),
+                country_code=geo_info.get('country_code'),
+                country_name=geo_info.get('country_name'),
+                city=geo_info.get('city'),
+                region=geo_info.get('region'),
             )
         except Exception:
             pass
@@ -1141,6 +1182,7 @@ async def proxy_chat_completions(request: Request, api_key_id: str = Depends(val
             print(f"INFO: Intent classifier -> {intent} ip={client_ip} tier={tier.name}")
             if intent.get("is_malicious") is True:
                 primary = pick_primary_label(security_labels)
+                geo_info = get_geolocation_info(client_ip)
                 try:
                     log_interaction(
                         endpoint="/v1/chat/completions",
@@ -1159,6 +1201,10 @@ async def proxy_chat_completions(request: Request, api_key_id: str = Depends(val
                         reason=intent.get("reason") or "intent_classifier_malicious",
                         api_key_id=getattr(request.state, "api_key_id", None),
                         api_key=getattr(request.state, "api_key", None),
+                        country_code=geo_info.get('country_code'),
+                        country_name=geo_info.get('country_name'),
+                        city=geo_info.get('city'),
+                        region=geo_info.get('region'),
                     )
                 except Exception:
                     pass
@@ -1175,6 +1221,7 @@ async def proxy_chat_completions(request: Request, api_key_id: str = Depends(val
         if insp.decision == "BLOCK":
             print(f"ALERTA: Firewall bloqueó la solicitud. ip={client_ip} score={insp.threat_score} flags={insp.flags}")
             primary = pick_primary_label(security_labels)
+            geo_info = get_geolocation_info(client_ip)
             try:
                 log_interaction(
                     endpoint="/v1/chat/completions",
@@ -1190,9 +1237,13 @@ async def proxy_chat_completions(request: Request, api_key_id: str = Depends(val
                     user_ip=client_ip,
                     layer=tier.name,
                     blocked_status="blocked",
-                    reason=f"firewall_flags: {', '.join(insp.flags) if insp.flags else 'BLOCK'}",
+                    reason="firewall_block",
                     api_key_id=getattr(request.state, "api_key_id", None),
                     api_key=getattr(request.state, "api_key", None),
+                    country_code=geo_info.get('country_code'),
+                    country_name=geo_info.get('country_name'),
+                    city=geo_info.get('city'),
+                    region=geo_info.get('region'),
                 )
             except Exception:
                 pass

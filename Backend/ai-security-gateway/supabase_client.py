@@ -94,6 +94,10 @@ def log_interaction(
     prompt_tokens: Optional[int] = None,
     completion_tokens: Optional[int] = None,
     total_tokens: Optional[int] = None,
+    country_code: Optional[str] = None,
+    country_name: Optional[str] = None,
+    city: Optional[str] = None,
+    region: Optional[str] = None,
 ) -> None:
     """Registra una interacción en Supabase.
 
@@ -111,6 +115,10 @@ def log_interaction(
         prompt_tokens: Tokens de prompt utilizados (opcional)
         completion_tokens: Tokens de completado utilizados (opcional)
         total_tokens: Total de tokens utilizados (opcional)
+        country_code: Código de país del usuario (opcional)
+        country_name: Nombre del país del usuario (opcional)
+        city: Ciudad del usuario (opcional)
+        region: Región del usuario (opcional)
     """
     if _DEBUG:
         print(f"[SUPABASE] log_interaction: Attempting to log to {table}")
@@ -167,6 +175,10 @@ def log_interaction(
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
+            "country_code": country_code,
+            "country_name": country_name,
+            "city": city,
+            "region": region,
             "created_at": datetime.now(timezone.utc).isoformat()
         }
         
