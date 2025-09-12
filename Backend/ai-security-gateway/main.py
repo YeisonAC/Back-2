@@ -284,6 +284,7 @@ app.add_middleware(
 class LogItem(BaseModel):
     id: str
     api_key_id: str
+    api_key_name: Optional[str] = None
     endpoint: str
     status: str
     created_at: str
@@ -1027,6 +1028,29 @@ async def get_logs(
             response.debug_info = debug_info
             return response
         
+        # Obtener nombres de API keys para mostrarlos en los logs
+        api_key_names = {}
+        try:
+            # Obtener nombres de API keys desde api_keys_public
+            api_keys_response = supabase.table("api_keys_public").select("id, name").in_("id", api_key_ids).execute()
+            if api_keys_response.data:
+                for key_data in api_keys_response.data:
+                    api_key_names[key_data["id"]] = key_data.get("name", f"API Key {key_data['id'][:8]}...")
+            
+            # Si no se encontraron en api_keys_public, intentar en api_keys
+            if not api_key_names:
+                api_keys_response = supabase.table("api_keys").select("id, name").in_("id", api_key_ids).execute()
+                if api_keys_response.data:
+                    for key_data in api_keys_response.data:
+                        api_key_names[key_data["id"]] = key_data.get("name", f"API Key {key_data['id'][:8]}...")
+                        
+            print(f"DEBUG: Nombres de API keys obtenidos: {api_key_names}")
+        except Exception as e:
+            print(f"DEBUG: Error obteniendo nombres de API keys: {str(e)}")
+            # Si no se pueden obtener los nombres, usar un formato por defecto
+            for api_key_id in api_key_ids:
+                api_key_names[api_key_id] = f"API Key {api_key_id[:8]}..."
+        
         # Convertir logs a formato LogItem
         log_items = []
         for log in logs_data:
@@ -1073,6 +1097,7 @@ async def get_logs(
                 log_item = LogItem(
                     id=str(log.get("id", f"log-{current_user_id[:8]}-{len(log_items)}")),
                     api_key_id=str(log.get("api_key_id", "")),
+                    api_key_name=api_key_names.get(log.get("api_key_id"), f"API Key {log.get('api_key_id', '')[:8]}..."),
                     endpoint=log.get("endpoint", "/api/unknown"),
                     status=log.get("status", "unknown"),
                     created_at=log.get("created_at", "2025-01-01T00:00:00Z"),
