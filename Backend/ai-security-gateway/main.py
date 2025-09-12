@@ -139,12 +139,23 @@ def _normalize_tier_name(raw: Optional[str]) -> str:
 
 def _select_tier(request: Request, request_body: dict = None) -> TierConfig:
     # Prioridad: Request body model > Header > query param > default
-    if request_body and "model" in request_body:
-        raw = request_body["model"]
-    else:
-        raw = request.headers.get("X-Layer") or request.query_params.get("layer")
-    name = _normalize_tier_name(raw)
-    return TIER_CONFIGS.get(name, TIER_CONFIGS["L1-mini"])
+    try:
+        if request_body and "model" in request_body:
+            raw = request_body["model"]
+            print(f"DEBUG: Using model from request body: {raw}")
+        else:
+            raw = request.headers.get("X-Layer") or request.query_params.get("layer")
+            print(f"DEBUG: Using model from header/query: {raw}")
+        
+        name = _normalize_tier_name(raw)
+        print(f"DEBUG: Normalized tier name: {name}")
+        
+        tier = TIER_CONFIGS.get(name, TIER_CONFIGS["L1-mini"])
+        print(f"DEBUG: Selected tier: {tier.name}")
+        return tier
+    except Exception as e:
+        print(f"DEBUG: Error in _select_tier: {e}")
+        raise
 
 
 def _estimate_tokens(text: str) -> int:
