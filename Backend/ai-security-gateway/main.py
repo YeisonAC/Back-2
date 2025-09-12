@@ -514,9 +514,6 @@ def pick_primary_label(labels: Set[str]) -> Optional[str]:
     """Seleccionar etiqueta primaria"""
     return next(iter(labels)) if labels else None
 
-def _normalize_tier_name(tier_name: str) -> str:
-    """Normalizar nombre de tier"""
-    return tier_name.lower()
 
 # Importar la clase AIFirewall real
 try:
