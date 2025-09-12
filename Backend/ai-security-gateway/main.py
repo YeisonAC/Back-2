@@ -28,11 +28,11 @@ try:
 except ImportError:
     from supabase_client import log_interaction
 
-# Importar servicio de geolocalización
+# Importar servicio de geolocalización simplificado
 try:
-    from .geolocation import geolocation_service
+    from .geolocation_simple import simple_geolocation_service as geolocation_service
 except ImportError:
-    from geolocation import geolocation_service
+    from geolocation_simple import simple_geolocation_service as geolocation_service
 
 # Cargar variables de entorno
 load_dotenv(dotenv_path=Path(__file__).with_name('.env'))
