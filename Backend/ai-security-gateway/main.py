@@ -18,9 +18,9 @@ from dataclasses import dataclass
 
 # Importar funciones de API keys
 try:
-    from .api_keys import create_api_key, list_api_keys, revoke_api_key, update_api_key, delete_api_key, get_api_key_meta, parse_full_key
+    from .api_keys import create_api_key, list_api_keys, revoke_api_key, update_api_key, delete_api_key, get_api_key_meta, parse_full_key, verify_api_key
 except ImportError:
-    from api_keys import create_api_key, list_api_keys, revoke_api_key, update_api_key, delete_api_key, get_api_key_meta, parse_full_key
+    from api_keys import create_api_key, list_api_keys, revoke_api_key, update_api_key, delete_api_key, get_api_key_meta, parse_full_key, verify_api_key
 
 # Importar función de logging
 try:
@@ -218,8 +218,38 @@ def get_supabase():
             return create_client(supabase_url, supabase_anon_key)
         except Exception:
             return None
-    except Exception:
+
+
+# Función de validación de API key
+def get_api_key_from_request(request: Request) -> Optional[str]:
+    """Extrae la API key de la request desde el header Authorization"""
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
         return None
+    
+    # Formato: Bearer <api_key>
+    if auth_header.startswith("Bearer "):
+        return auth_header[7:].strip()
+    
+    # Formato alternativo: <api_key> directamente
+    return auth_header.strip()
+
+
+async def validate_api_key(request: Request) -> str:
+    """Valida la API key y devuelve el key_id si es válida"""
+    api_key = get_api_key_from_request(request)
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+    
+    is_valid, key_id = verify_api_key(api_key)
+    if not is_valid:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    # Guardar el key_id y api_key en el request state para logging
+    request.state.api_key_id = key_id
+    request.state.api_key = api_key
+    
+    return key_id
 
 # Configuración CORS
 app.add_middleware(
@@ -350,8 +380,126 @@ def _build_forwarded_ip_headers(request: Request, client_ip: str) -> Dict[str, s
 
 
 def classify_intent(request: Request, content: str, client_ip: str, tier) -> Optional[Dict]:
-    """Clasificar intención del usuario"""
-    # Implementación simple - siempre retornar None por ahora
+    """Clasificar intención del usuario y detecta contenido malicioso"""
+    content_lower = content.lower().strip()
+    
+    # Patrones maliciosos conocidos
+    malicious_patterns = [
+        "act as a dan",
+        "do anything now",
+        "ignore all restrictions",
+        "bypass safety",
+        "jailbreak",
+        "ignore previous instructions",
+        "pretend to be",
+        "roleplay as",
+        "you are now",
+        "from now on",
+        "disable ethics",
+        "remove limitations",
+        "unfiltered response",
+        "without restrictions",
+        "no content policy",
+        "ignore guidelines",
+        "bypass filters",
+        "override programming",
+        "ignore safety measures",
+        "disable moderation",
+        "ignore content policy",
+        "you have been freed",
+        "hypothetical scenario",
+        "for educational purposes",
+        "just testing",
+        "what if you could",
+        "imagine you are",
+        "in this hypothetical",
+        "assume you can",
+        "for the sake of argument",
+        "let's pretend",
+        "suppose that",
+        "if you were able to",
+        "in a fictional scenario",
+        "for testing purposes",
+        "just curious",
+        "theoretical question",
+        "what would happen if",
+        "can you tell me how to",
+        "i need help with",
+        "guide me through",
+        "step by step instructions",
+        "how to make",
+        "how to create",
+        "how to build",
+        "instructions for",
+        "recipe for",
+        "process of making",
+        "method to create",
+        "way to produce",
+        "technique for building",
+        "procedure to make",
+        "steps to create",
+        "blueprint for",
+        "plan to construct",
+        "detailed guide on",
+        "walkthrough for",
+        "tutorial on",
+        "explain how to",
+        "show me how to",
+        "teach me to",
+        "help me make",
+        "assist me in creating",
+        "direct me on how to",
+        "instruct me on",
+        "demonstrate how to",
+        "provide instructions for",
+        "give me steps to",
+        "tell me how to",
+    ]
+    
+    # Verificar si el contenido contiene patrones maliciosos
+    detected_patterns = []
+    for pattern in malicious_patterns:
+        if pattern in content_lower:
+            detected_patterns.append(pattern)
+    
+    if detected_patterns:
+        return {
+            "is_malicious": True,
+            "confidence": min(0.9, 0.3 + (len(detected_patterns) * 0.1)),
+            "patterns": detected_patterns,
+            "reason": f"Detected malicious patterns: {', '.join(detected_patterns[:3])}",
+            "category": "jailbreak_attempt"
+        }
+    
+    # Verificar si hay intento de obtener información sensible
+    sensitive_info_patterns = [
+        "password",
+        "credit card",
+        "ssn",
+        "social security",
+        "bank account",
+        "personal information",
+        "private data",
+        "confidential",
+        "secret",
+        "classified",
+    ]
+    
+    sensitive_detected = []
+    for pattern in sensitive_info_patterns:
+        if pattern in content_lower:
+            sensitive_detected.append(pattern)
+    
+    if sensitive_detected:
+        return {
+            "is_malicious": True,
+            "confidence": 0.7,
+            "patterns": sensitive_detected,
+            "reason": f"Detected sensitive information request: {', '.join(sensitive_detected[:3])}",
+            "category": "sensitive_info_request"
+        }
+    
+    # Si no se detecta nada malicioso, retornar None
     return None
 
 def derive_labels_from_intent(intent: Dict) -> Set[str]:
@@ -932,7 +1080,7 @@ async def get_logs(
 
 # -------- Endpoint Proxy: Chat Completions --------
 @app.post("/v1/chat/completions")
-async def proxy_chat_completions(request: Request):
+async def proxy_chat_completions(request: Request, api_key_id: str = Depends(validate_api_key)):
     request_body = await request.json()
     
     try:
@@ -1119,6 +1267,8 @@ async def proxy_chat_completions(request: Request):
             else:
                 data.setdefault("intent_layer", {"enabled": tier.enable_intent_layer, "last_intent": None})
 
+            # Reemplazar el modelo con el nombre del tier
+            data["model"] = tier.name
             data["tier"] = tier.name
             # Añadir etiquetas de seguridad
             primary = pick_primary_label(security_labels)
