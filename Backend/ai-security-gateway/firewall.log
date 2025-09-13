@@ -1,0 +1,37 @@
+2025-09-12 16:49:03,310 - Firewall - INFO - [WHITELISTED] IP: 127.0.0.1 | Rule: UNKNOWN | Details: IP en lista blanca.
+2025-09-12 16:49:03,311 - Firewall - INFO - [BLOCKED_IP] IP: 192.168.1.200 | Rule: UNKNOWN | Details: IP en lista negra: {'ip': '192.168.1.200', 'type': 'static', 'reason': 'Manually blacklisted'}
+2025-09-12 16:49:03,311 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,311 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,311 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,312 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,312 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,312 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,312 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,312 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,312 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,312 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,312 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,312 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,313 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,313 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,313 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,313 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,313 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,313 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,313 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,313 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,313 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,313 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,314 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,314 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,314 - Firewall - INFO - [ALLOWED] IP: 192.168.1.201 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,314 - Firewall - INFO - [TEST_EVENT] IP: 192.168.1.1 | Rule: UNKNOWN | Details: This is a test event
+2025-09-12 16:49:03,314 - Firewall - WARNING - [TEST_BLOCK] IP: 192.168.1.2 | Rule: UNKNOWN | Details: This is a test block event
+2025-09-12 16:49:03,315 - Firewall - INFO - [ALLOWED] IP: 192.168.1.300 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 16:49:03,315 - Firewall - INFO - [ALLOWED] IP: 192.168.1.301 | Rule: UNKNOWN | Details: Solicitud permitida.
+2025-09-12 18:41:05,428 - httpx - INFO - HTTP Request: GET https://cbhpwnxuhnkgsbwtjikx.supabase.co/rest/v1/user_tokens?select=%2A%2Cplans%28%2A%29&user_id=eq.test_user "HTTP/2 400 Bad Request"
+2025-09-12 18:41:05,809 - httpx - INFO - HTTP Request: GET https://cbhpwnxuhnkgsbwtjikx.supabase.co/rest/v1/user_tokens?select=%2A%2Cplans%28%2A%29&user_id=eq.invalid_user "HTTP/2 400 Bad Request"
+2025-09-12 18:41:05,967 - httpx - INFO - HTTP Request: GET https://cbhpwnxuhnkgsbwtjikx.supabase.co/rest/v1/user_tokens?select=tokens_used&user_id=eq.invalid_user "HTTP/2 404 Not Found"
+2025-09-12 18:41:06,168 - httpx - INFO - HTTP Request: GET https://cbhpwnxuhnkgsbwtjikx.supabase.co/rest/v1/plans?select=%2A&limit=1 "HTTP/2 200 OK"
+2025-09-12 18:41:06,329 - httpx - INFO - HTTP Request: GET https://cbhpwnxuhnkgsbwtjikx.supabase.co/rest/v1/user_tokens?select=%2A&limit=1 "HTTP/2 404 Not Found"
+2025-09-12 18:41:06,484 - httpx - INFO - HTTP Request: GET https://cbhpwnxuhnkgsbwtjikx.supabase.co/rest/v1/token_transactions?select=%2A&limit=1 "HTTP/2 404 Not Found"

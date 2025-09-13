@@ -28,6 +28,12 @@ try:
 except ImportError:
     from supabase_client import log_interaction
 
+# Importar sistema de créditos
+try:
+    from .credits_manager import consume_credits, check_credits_before_request, get_user_credits
+except ImportError:
+    from credits_manager import consume_credits, check_credits_before_request, get_user_credits
+
 # Importar servicio de geolocalización simplificado
 try:
     from .geolocation_simple import simple_geolocation_service as geolocation_service
@@ -353,6 +359,51 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = None
     stream: Optional[bool] = False
 
+# Modelos para gestión de reglas de firewall de usuario
+class CreateFirewallRuleRequest(BaseModel):
+    name: str
+    description: str
+    rule_type: str  # RuleType enum value
+    action: str  # RuleAction enum value
+    conditions: Dict[str, Any]
+    priority: Optional[int] = 0
+    expires_at: Optional[str] = None  # ISO datetime string
+
+class UpdateFirewallRuleRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    action: Optional[str] = None
+    status: Optional[str] = None
+    conditions: Optional[Dict[str, Any]] = None
+    priority: Optional[int] = None
+    expires_at: Optional[str] = None
+
+class FirewallRuleResponse(BaseModel):
+    id: str
+    user_id: str
+    api_key_id: str
+    name: str
+    description: str
+    rule_type: str
+    action: str
+    status: str
+    conditions: Dict[str, Any]
+    priority: int
+    created_at: str
+    updated_at: str
+    expires_at: Optional[str] = None
+
+class FirewallRulesResponse(BaseModel):
+    rules: List[FirewallRuleResponse]
+    total: int
+    page: int
+    page_size: int
+
+class RuleTypesResponse(BaseModel):
+    rule_types: List[Dict[str, Any]]
+    actions: List[str]
+    statuses: List[str]
+
 # Constantes para el servicio
 SERVICE_NAME = "EONS API"
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -565,6 +616,16 @@ try:
     from .ai_firewall import AIFirewall
 except ImportError:
     from ai_firewall import AIFirewall
+
+# Importar el nuevo sistema de firewall
+try:
+    from .firewall import firewall_rules_engine, FirewallResult
+    from .firewall import log_event, alert_admin
+    from .firewall.user_rules import UserFirewallRule, RuleType, RuleAction, RuleStatus, user_rules_manager
+except ImportError:
+    from firewall import firewall_rules_engine, FirewallResult
+    from firewall import log_event, alert_admin
+    from firewall.user_rules import UserFirewallRule, RuleType, RuleAction, RuleStatus, user_rules_manager
 
 # Instancia global del firewall real
 firewall = AIFirewall()
@@ -1152,8 +1213,163 @@ async def get_logs(
 # -------- Endpoint Proxy: Chat Completions --------
 @app.post("/v1/chat/completions")
 async def proxy_chat_completions(request: Request, api_key_id: str = Depends(validate_api_key)):
-    request_body = await request.json()
+    """
+    Endpoint principal que proxyea peticiones a Groq con firewall integrado
+    """
+    # Obtener IP del cliente para el firewall
+    client_ip = get_client_ip(request)
     
+    # Preparar datos para el firewall
+    firewall_request_data = {
+        "client_ip": client_ip,
+        "headers": dict(request.headers),
+        "url": str(request.url),
+        "method": request.method,
+        "api_key_id": api_key_id
+    }
+    
+    # Ejecutar firewall rules engine
+    firewall_result: FirewallResult = firewall_rules_engine.process_request(firewall_request_data)
+    
+    # Si el firewall bloquea la solicitud, retornar error
+    if firewall_result.decision == "DENY":
+        log_event(
+            event_type="FIREWALL_BLOCKED",
+            source_ip=client_ip,
+            details=firewall_result.reason,
+            request_data=firewall_request_data,
+            rule_triggered=firewall_result.rule_triggered,
+            threat_analysis=firewall_result.threat_analysis.__dict__ if firewall_result.threat_analysis else None,
+            severity="ERROR"
+        )
+        
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": {
+                    "message": firewall_result.reason,
+                    "type": "firewall_blocked",
+                    "rule_triggered": firewall_result.rule_triggered,
+                    "confidence_score": firewall_result.confidence_score
+                }
+            }
+        )
+    
+    # Si el firewall permite la solicitud, continuar con el procesamiento normal
+    try:
+        # Parsear el body de la request
+        request_body = await request.json()
+    except Exception as e:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "Invalid JSON body", "type": "invalid_request_error"}}
+        )
+    
+    # Verificar tokens del usuario antes de procesar la solicitud
+    try:
+        # Obtener user_id desde los metadatos de la API key
+        api_key_meta = get_api_key_meta(api_key_id)
+        user_id = api_key_meta.get("owner_user_id") if api_key_meta else api_key_id
+        
+        if user_id:
+            # Estimar tokens requeridos para esta solicitud (basado en input)
+            estimated_tokens = _estimate_tokens(str(request_body.get("messages", [])))
+            
+            # Verificar si el usuario tiene suficientes tokens según su plan
+            token_check = check_token_limit_before_request(user_id, estimated_tokens)
+            if not token_check["success"]:
+                print(f"[TOKENS] Token limit check failed for user {user_id}: {token_check.get('error', 'Unknown error')}")
+                
+                # Registrar el evento de insuficiencia de tokens
+                log_interaction(
+                    endpoint="/v1/chat/completions",
+                    request_payload=request_body,
+                    response_payload={"error": "Insufficient tokens", "estimated_tokens": estimated_tokens},
+                    status="blocked",
+                    user_ip=client_ip,
+                    layer="tokens",
+                    blocked_status="insufficient_tokens",
+                    reason=token_check.get("error", "Insufficient tokens"),
+                    api_key_id=api_key_id,
+                    country_code=geolocation_info.get("country_code"),
+                    country_name=geolocation_info.get("country_name"),
+                    city=geolocation_info.get("city"),
+                    region=geolocation_info.get("region"),
+                )
+                
+                return JSONResponse(
+                    status_code=402,  # 402 Payment Required
+                    content={
+                        "error": {
+                            "message": token_check.get("error", "Insufficient tokens"),
+                            "type": "insufficient_tokens",
+                            "estimated_tokens_required": estimated_tokens,
+                            "plan_info": token_check.get("plan_info", {})
+                        }
+                    }
+                )
+            
+            print(f"[TOKENS] Token limit check passed for user {user_id}. Available: {token_check.get('remaining_tokens', 'Unknown')}")
+        else:
+            print(f"[CREDITS] No user_id found for api_key {api_key_id}, skipping credit check")
+            
+    except Exception as credit_error:
+        print(f"[CREDITS] Error during credit check: {credit_error}")
+        # Continuar con el procesamiento normal si hay error en la verificación de créditos
+        # para no interrumpir el servicio por problemas con el sistema de créditos
+    
+    # Agregar contenido del mensaje al firewall request data para análisis de IA
+    if "messages" in request_body:
+        firewall_request_data["messages"] = request_body["messages"]
+        firewall_request_data["content"] = request_body["messages"][-1]["content"] if request_body["messages"] else ""
+    
+    # Obtener información de geolocalización
+    geolocation_info = get_geolocation_info(client_ip)
+    country_code = geolocation_info.get("country_code", "Unknown")
+    country_name = geolocation_info.get("country_name", "Unknown")
+    
+    # Seleccionar tier basado en la request
+    tier = _select_tier(request, request_body)
+    
+    # Inicializar AIFirewall existente
+    ai_firewall = AIFirewall()
+    
+    # Obtener user_id para el historial del firewall
+    user_id = api_key_id  # Usar api_key_id como user_id para el historial
+    
+    # Inspeccionar el prompt con el AIFirewall existente
+    if "messages" in request_body and len(request_body["messages"]) > 0:
+        last_message = request_body["messages"][-1]
+        if last_message["role"] == "user":
+            prompt = last_message["content"]
+            
+            # Inspeccionar la solicitud
+            inspection_result = ai_firewall.inspect_request(user_id, prompt)
+            
+            # Si el AIFirewall existente bloquea, retornar error
+            if inspection_result.decision == "BLOCK":
+                log_event(
+                    event_type="AI_FIREWALL_BLOCKED",
+                    source_ip=client_ip,
+                    details=f"AIFirewall blocked request: {', '.join(inspection_result.flags)}",
+                    request_data=firewall_request_data,
+                    rule_triggered="AI_FIREWALL_LEGACY",
+                    severity="WARNING"
+                )
+                
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "error": {
+                            "message": "Request blocked by AI firewall",
+                            "type": "ai_firewall_blocked",
+                            "flags": inspection_result.flags,
+                            "threat_score": inspection_result.threat_score
+                        }
+                    }
+                )
+    
+    # Continuar con el procesamiento normal del chat completion
     try:
         chat_request = ChatCompletionRequest(**request_body)
     except Exception as e:
@@ -1376,6 +1592,55 @@ async def proxy_chat_completions(request: Request, api_key_id: str = Depends(val
                     completion_tokens=(data.get("usage", {}) or {}).get("completion_tokens"),
                     total_tokens=(data.get("usage", {}) or {}).get("total_tokens"),
                 )
+                
+                # Consumir tokens después de una respuesta exitosa
+                try:
+                    api_key_meta = get_api_key_meta(api_key_id)
+                    user_id = api_key_meta.get("owner_user_id") if api_key_meta else api_key_id
+                    
+                    if user_id:
+                        # Consumir tokens directamente (1:1) según el plan del usuario
+                        total_tokens = (data.get("usage", {}) or {}).get("total_tokens", 0)
+                        
+                        # Verificar límite de tokens del plan antes de consumir
+                        token_check = check_token_limit_before_request(user_id, total_tokens)
+                        if not token_check["success"]:
+                            print(f"[TOKENS] Token limit exceeded for user {user_id}: {token_check.get('error', 'Unknown error')}")
+                            # No bloquear la respuesta si excede el límite, pero registrar el evento
+                            log_interaction(
+                                endpoint="/v1/chat/completions",
+                                request_payload=request_body,
+                                response_payload={"error": "Token limit exceeded", "tokens_requested": total_tokens},
+                                status="warning",
+                                user_ip=client_ip,
+                                layer="tokens",
+                                blocked_status="token_limit_exceeded",
+                                reason=token_check.get("error", "Token limit exceeded"),
+                                api_key_id=api_key_id,
+                                country_code=geolocation_info.get("country_code"),
+                                country_name=geolocation_info.get("country_name"),
+                                city=geolocation_info.get("city"),
+                                region=geolocation_info.get("region"),
+                            )
+                        else:
+                            # Consumir tokens directamente
+                            token_result = consume_tokens(user_id, total_tokens, api_key_id)
+                            if token_result["success"]:
+                                print(f"[TOKENS] Successfully consumed {total_tokens} tokens from user {user_id}. Remaining: {token_result.get('remaining_tokens', 'Unknown')}")
+                                # Agregar información de tokens a la respuesta
+                                data["tokens_consumed"] = total_tokens
+                                data["remaining_tokens"] = token_result.get('remaining_tokens')
+                                data["plan_info"] = token_result.get('plan_info')
+                            else:
+                                print(f"[TOKENS] Failed to consume tokens from user {user_id}: {token_result.get('error', 'Unknown error')}")
+                                # No bloquear la respuesta si falla el consumo de tokens
+                    else:
+                        print(f"[TOKENS] No user_id found for api_key {api_key_id}, skipping token consumption")
+                        
+                except Exception as token_error:
+                    print(f"[TOKENS] Error during token consumption: {token_error}")
+                    # Continuar normalmente si hay error en el consumo de tokens
+                    
             except Exception:
                 pass
 
@@ -1834,6 +2099,656 @@ async def mgmt_delete_key(request: Request, key_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting API key: {str(e)}")
 
+
+# -------- User Firewall Rules Management --------
+
+@app.get("/v1/firewall/rules/types", response_model=RuleTypesResponse)
+async def get_firewall_rule_types():
+    """Get available firewall rule types and their configuration options"""
+    rule_types_info = [
+        {
+            "type": "ip_whitelist",
+            "name": "IP Whitelist",
+            "description": "Allow requests only from specific IP addresses",
+            "conditions_schema": {
+                "ips": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of allowed IP addresses"
+                }
+            }
+        },
+        {
+            "type": "ip_blacklist",
+            "name": "IP Blacklist",
+            "description": "Block requests from specific IP addresses",
+            "conditions_schema": {
+                "ips": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of blocked IP addresses"
+                }
+            }
+        },
+        {
+            "type": "country_block",
+            "name": "Country Block",
+            "description": "Block requests from specific countries",
+            "conditions_schema": {
+                "countries": {
+                    "type": "array",
+                    "items": {"type": "string", "maxLength": 2},
+                    "description": "List of 2-letter country codes to block"
+                }
+            }
+        },
+        {
+            "type": "rate_limit",
+            "name": "Rate Limit",
+            "description": "Limit number of requests per time period",
+            "conditions_schema": {
+                "requests_per_minute": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum requests per minute"
+                }
+            }
+        },
+        {
+            "type": "pattern_block",
+            "name": "Pattern Block",
+            "description": "Block requests containing specific patterns",
+            "conditions_schema": {
+                "patterns": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of patterns to block in request content"
+                }
+            }
+        },
+        {
+            "type": "time_block",
+            "name": "Time Block",
+            "description": "Block requests during specific time ranges",
+            "conditions_schema": {
+                "start_time": {
+                    "type": "string",
+                    "pattern": "^([01]?[0-9]|2[0-3]):[0-5][0-9]$",
+                    "description": "Start time in HH:MM format"
+                },
+                "end_time": {
+                    "type": "string",
+                    "pattern": "^([01]?[0-9]|2[0-3]):[0-5][0-9]$",
+                    "description": "End time in HH:MM format"
+                }
+            }
+        },
+        {
+            "type": "user_agent_block",
+            "name": "User Agent Block",
+            "description": "Block requests from specific user agents",
+            "conditions_schema": {
+                "user_agents": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of user agent patterns to block"
+                }
+            }
+        },
+        {
+            "type": "custom_ai_rule",
+            "name": "Custom AI Rule",
+            "description": "Custom rules using AI pattern detection",
+            "conditions_schema": {
+                "prompt_patterns": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of prompt patterns to detect"
+                }
+            }
+        }
+    ]
+    
+    return RuleTypesResponse(
+        rule_types=rule_types_info,
+        actions=[action.value for action in RuleAction],
+        statuses=[status.value for status in RuleStatus]
+    )
+
+@app.post("/v1/firewall/rules", response_model=FirewallRuleResponse)
+async def create_firewall_rule(
+    request: Request,
+    body: CreateFirewallRuleRequest,
+    api_key_id: str = Depends(validate_api_key)
+):
+    """Create a new firewall rule for the authenticated user's API key"""
+    user_id = getattr(request.state, "api_key_id", api_key_id)  # Use API key ID as user ID
+    
+    # Validate rule type
+    try:
+        rule_type = RuleType(body.rule_type)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid rule type: {body.rule_type}")
+    
+    # Validate action
+    try:
+        action = RuleAction(body.action)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid action: {body.action}")
+    
+    # Validate conditions
+    validation_errors = user_rules_manager.validate_rule_conditions(rule_type, body.conditions)
+    if validation_errors:
+        raise HTTPException(status_code=400, detail={"errors": validation_errors})
+    
+    # Parse expiration date
+    expires_at = None
+    if body.expires_at:
+        try:
+            expires_at = datetime.fromisoformat(body.expires_at.replace('Z', '+00:00'))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid expires_at format. Use ISO datetime format.")
+    
+    # Create the rule
+    rule = UserFirewallRule(
+        id="",  # Will be generated
+        user_id=user_id,
+        api_key_id=api_key_id,
+        name=body.name,
+        description=body.description,
+        rule_type=rule_type,
+        action=action,
+        status=RuleStatus.ACTIVE,
+        conditions=body.conditions,
+        priority=body.priority or 0,
+        expires_at=expires_at
+    )
+    
+    # Save the rule
+    rule_id = user_rules_manager.create_rule(rule)
+    created_rule = user_rules_manager.get_rule(rule_id)
+    
+    if not created_rule:
+        raise HTTPException(status_code=500, detail="Failed to create rule")
+    
+    return FirewallRuleResponse(**created_rule.to_dict())
+
+@app.get("/v1/firewall/rules", response_model=FirewallRulesResponse)
+async def get_firewall_rules(
+    request: Request,
+    page: int = 1,
+    page_size: int = 20,
+    api_key_id: str = Depends(validate_api_key)
+):
+    """Get all firewall rules for the authenticated user's API key"""
+    user_id = getattr(request.state, "api_key_id", api_key_id)
+    
+    # Get rules for this user and API key
+    rules = user_rules_manager.get_user_rules(user_id, api_key_id)
+    
+    # Paginate
+    total = len(rules)
+    start = (page - 1) * page_size
+    end = start + page_size
+    paginated_rules = rules[start:end]
+    
+    rule_responses = [FirewallRuleResponse(**rule.to_dict()) for rule in paginated_rules]
+    
+    return FirewallRulesResponse(
+        rules=rule_responses,
+        total=total,
+        page=page,
+        page_size=page_size
+    )
+
+@app.get("/v1/firewall/rules/{rule_id}", response_model=FirewallRuleResponse)
+async def get_firewall_rule(
+    rule_id: str,
+    request: Request,
+    api_key_id: str = Depends(validate_api_key)
+):
+    """Get a specific firewall rule by ID"""
+    user_id = getattr(request.state, "api_key_id", api_key_id)
+    
+    rule = user_rules_manager.get_rule(rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    
+    # Check if rule belongs to this user
+    if rule.user_id != user_id or rule.api_key_id != api_key_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    return FirewallRuleResponse(**rule.to_dict())
+
+@app.put("/v1/firewall/rules/{rule_id}", response_model=FirewallRuleResponse)
+async def update_firewall_rule(
+    rule_id: str,
+    request: Request,
+    body: UpdateFirewallRuleRequest,
+    api_key_id: str = Depends(validate_api_key)
+):
+    """Update an existing firewall rule"""
+    user_id = getattr(request.state, "api_key_id", api_key_id)
+    
+    # Get existing rule
+    existing_rule = user_rules_manager.get_rule(rule_id)
+    if not existing_rule:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    
+    # Check ownership
+    if existing_rule.user_id != user_id or existing_rule.api_key_id != api_key_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Prepare updates
+    updates = {}
+    if body.name is not None:
+        updates["name"] = body.name
+    if body.description is not None:
+        updates["description"] = body.description
+    if body.action is not None:
+        try:
+            updates["action"] = RuleAction(body.action)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid action: {body.action}")
+    if body.status is not None:
+        try:
+            updates["status"] = RuleStatus(body.status)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid status: {body.status}")
+    if body.conditions is not None:
+        # Validate conditions if they're being updated
+        validation_errors = user_rules_manager.validate_rule_conditions(existing_rule.rule_type, body.conditions)
+        if validation_errors:
+            raise HTTPException(status_code=400, detail={"errors": validation_errors})
+        updates["conditions"] = body.conditions
+    if body.priority is not None:
+        updates["priority"] = body.priority
+    if body.expires_at is not None:
+        try:
+            updates["expires_at"] = datetime.fromisoformat(body.expires_at.replace('Z', '+00:00'))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid expires_at format. Use ISO datetime format.")
+    
+    # Update the rule
+    updated_rule = user_rules_manager.update_rule(rule_id, updates)
+    if not updated_rule:
+        raise HTTPException(status_code=500, detail="Failed to update rule")
+    
+    return FirewallRuleResponse(**updated_rule.to_dict())
+
+@app.delete("/v1/firewall/rules/{rule_id}")
+async def delete_firewall_rule(
+    rule_id: str,
+    request: Request,
+    api_key_id: str = Depends(validate_api_key)
+):
+    """Delete a firewall rule"""
+    user_id = getattr(request.state, "api_key_id", api_key_id)
+    
+    # Get existing rule
+    existing_rule = user_rules_manager.get_rule(rule_id)
+    if not existing_rule:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    
+    # Check ownership
+    if existing_rule.user_id != user_id or existing_rule.api_key_id != api_key_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Delete the rule
+    success = user_rules_manager.delete_rule(rule_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to delete rule")
+    
+    return {"message": "Rule deleted successfully"}
+
+@app.get("/v1/firewall/rules/stats")
+async def get_firewall_rules_stats(
+    request: Request,
+    api_key_id: str = Depends(validate_api_key)
+):
+    """Get statistics for the authenticated user's firewall rules"""
+    user_id = getattr(request.state, "api_key_id", api_key_id)
+    
+    # Get user's rules
+    user_rules = user_rules_manager.get_user_rules(user_id, api_key_id)
+    
+    # Calculate statistics
+    total_rules = len(user_rules)
+    active_rules = len([r for r in user_rules if r.status == RuleStatus.ACTIVE])
+    inactive_rules = len([r for r in user_rules if r.status == RuleStatus.INACTIVE])
+    expired_rules = len([r for r in user_rules if r.status == RuleStatus.EXPIRED])
+    
+    # Count by rule type
+    rule_type_counts = {}
+    for rule in user_rules:
+        rule_type = rule.rule_type.value
+        rule_type_counts[rule_type] = rule_type_counts.get(rule_type, 0) + 1
+    
+    # Count by action
+    action_counts = {}
+    for rule in user_rules:
+        action = rule.action.value
+        action_counts[action] = action_counts.get(action, 0) + 1
+    
+    return {
+        "total_rules": total_rules,
+        "active_rules": active_rules,
+        "inactive_rules": inactive_rules,
+        "expired_rules": expired_rules,
+        "rule_type_distribution": rule_type_counts,
+        "action_distribution": action_counts
+    }
+
+# -------- Token Management Endpoints --------
+
+@app.get("/v1/tokens/balance", response_model=dict)
+async def get_token_balance(
+    request: Request,
+    api_key_id: str = Depends(validate_api_key)
+):
+    """
+    Get current token balance and plan information for the authenticated user
+    """
+    try:
+        # Obtener user_id desde los metadatos de la API key
+        api_key_meta = get_api_key_meta(api_key_id)
+        user_id = api_key_meta.get("owner_user_id") if api_key_meta else api_key_id
+        
+        if not user_id:
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"message": "User not found for this API key", "type": "user_not_found"}}
+            )
+        
+        # Obtener información de tokens y plan
+        token_info = get_remaining_tokens(user_id)
+        plan_info = get_user_plan(user_id)
+        
+        if token_info is None or plan_info is None:
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"message": "Token account not found", "type": "account_not_found"}}
+            )
+        
+        return {
+            "user_id": user_id,
+            "tokens": {
+                "remaining_tokens": token_info["remaining_tokens"],
+                "tokens_used": token_info["tokens_used"],
+                "token_limit": token_info["token_limit"],
+                "usage_percentage": token_info["usage_percentage"]
+            },
+            "plan": {
+                "plan_name": plan_info["plan_name"],
+                "plan_id": plan_info["plan_id"],
+                "token_limit": plan_info["token_limit"],
+                "description": plan_info["description"]
+            },
+            "api_key_id": api_key_id
+        }
+        
+    except Exception as e:
+        print(f"[TOKENS] Error getting token balance: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"message": "Internal server error", "type": "internal_error"}}
+        )
+
+
+@app.get("/v1/credits/balance", response_model=dict)
+async def get_credit_balance(
+    request: Request,
+    api_key_id: str = Depends(validate_api_key)
+):
+    """
+    Legacy endpoint - Get current credit balance for the authenticated user
+    Note: This endpoint is deprecated and will be removed in future versions
+    """
+    try:
+        # Obtener user_id desde los metadatos de la API key
+        api_key_meta = get_api_key_meta(api_key_id)
+        user_id = api_key_meta.get("owner_user_id") if api_key_meta else api_key_id
+        
+        if not user_id:
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"message": "User not found for this API key", "type": "user_not_found"}}
+            )
+        
+        # Obtener saldo de tokens (convertido a créditos para compatibilidad)
+        token_info = get_remaining_tokens(user_id)
+        
+        if token_info is None:
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"message": "Credit account not found", "type": "account_not_found"}}
+            )
+        
+        return {
+            "user_id": user_id,
+            "credits_balance": token_info["remaining_tokens"],  # Legacy: tokens as credits
+            "api_key_id": api_key_id,
+            "deprecated": True,
+            "note": "This endpoint is deprecated. Please use /v1/tokens/balance instead."
+        }
+        
+    except Exception as e:
+        print(f"[CREDITS] Error getting credit balance: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"message": "Internal server error", "type": "internal_error"}}
+        )
+
+@app.post("/v1/tokens/add", response_model=dict)
+async def add_tokens_to_user(
+    request: Request,
+    tokens: int,
+    reason: str = None,
+    api_key_id: str = Depends(validate_api_key)
+):
+    """
+    Add tokens to the authenticated user's account (admin only or self-service)
+    Note: Use positive values to add tokens, negative values to reduce usage
+    """
+    try:
+        # Obtener user_id desde los metadatos de la API key
+        api_key_meta = get_api_key_meta(api_key_id)
+        user_id = api_key_meta.get("owner_user_id") if api_key_meta else api_key_id
+        
+        if not user_id:
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"message": "User not found for this API key", "type": "user_not_found"}}
+            )
+        
+        # Importar el gestor de tokens
+        try:
+            from .credits_manager import token_manager
+        except ImportError:
+            from credits_manager import token_manager
+        
+        # Añadir tokens
+        result = token_manager.add_tokens_to_user(user_id, tokens, reason, api_key_id)
+        
+        if result["success"]:
+            return {
+                "user_id": user_id,
+                "tokens_added": result["tokens_added"],
+                "total_tokens_used": result["total_tokens_used"],
+                "remaining_tokens": result["remaining_tokens"],
+                "plan_info": result["plan_info"],
+                "reason": reason
+            }
+        else:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"message": result.get("error", "Failed to add tokens"), "type": "token_operation_failed"}}
+            )
+        
+    except Exception as e:
+        print(f"[TOKENS] Error adding tokens: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"message": "Internal server error", "type": "internal_error"}}
+        )
+
+
+@app.post("/v1/credits/add", response_model=dict)
+async def add_credits_to_user(
+    request: Request,
+    credits: int,
+    reason: str = None,
+    api_key_id: str = Depends(validate_api_key)
+):
+    """
+    Legacy endpoint - Add credits to the authenticated user's account (admin only or self-service)
+    Note: This endpoint is deprecated and will be removed in future versions
+    """
+    try:
+        # Obtener user_id desde los metadatos de la API key
+        api_key_meta = get_api_key_meta(api_key_id)
+        user_id = api_key_meta.get("owner_user_id") if api_key_meta else api_key_id
+        
+        if not user_id:
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"message": "User not found for this API key", "type": "user_not_found"}}
+            )
+        
+        # Importar el gestor de tokens
+        try:
+            from .credits_manager import token_manager
+        except ImportError:
+            from credits_manager import token_manager
+        
+        # Añadir tokens (convertidos de créditos para compatibilidad)
+        result = token_manager.add_tokens_to_user(user_id, credits, reason, api_key_id)
+        
+        if result["success"]:
+            return {
+                "user_id": user_id,
+                "credits_added": result["tokens_added"],  # Legacy: tokens as credits
+                "new_balance": result["remaining_tokens"],  # Legacy: remaining tokens as balance
+                "reason": reason,
+                "deprecated": True,
+                "note": "This endpoint is deprecated. Please use /v1/tokens/add instead."
+            }
+        else:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"message": result.get("error", "Failed to add credits"), "type": "credit_operation_failed"}}
+            )
+        
+    except Exception as e:
+        print(f"[CREDITS] Error adding credits: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"message": "Internal server error", "type": "internal_error"}}
+        )
+
+@app.get("/v1/tokens/history", response_model=dict)
+async def get_token_history(
+    request: Request,
+    limit: int = 50,
+    api_key_id: str = Depends(validate_api_key)
+):
+    """
+    Get token transaction history for the authenticated user
+    """
+    try:
+        # Obtener user_id desde los metadatos de la API key
+        api_key_meta = get_api_key_meta(api_key_id)
+        user_id = api_key_meta.get("owner_user_id") if api_key_meta else api_key_id
+        
+        if not user_id:
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"message": "User not found for this API key", "type": "user_not_found"}}
+            )
+        
+        # Importar el gestor de tokens
+        try:
+            from .credits_manager import token_manager
+        except ImportError:
+            from credits_manager import token_manager
+        
+        # Obtener historial de tokens
+        history = token_manager.get_user_token_history(user_id, limit)
+        
+        return {
+            "user_id": user_id,
+            "transactions": history or [],
+            "total_transactions": len(history) if history else 0,
+            "limit": limit
+        }
+        
+    except Exception as e:
+        print(f"[TOKENS] Error getting token history: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"message": "Internal server error", "type": "internal_error"}}
+        )
+
+
+@app.get("/v1/credits/history", response_model=dict)
+async def get_credit_history(
+    request: Request,
+    limit: int = 50,
+    api_key_id: str = Depends(validate_api_key)
+):
+    """
+    Legacy endpoint - Get credit transaction history for the authenticated user
+    Note: This endpoint is deprecated and will be removed in future versions
+    """
+    try:
+        # Obtener user_id desde los metadatos de la API key
+        api_key_meta = get_api_key_meta(api_key_id)
+        user_id = api_key_meta.get("owner_user_id") if api_key_meta else api_key_id
+        
+        if not user_id:
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"message": "User not found for this API key", "type": "user_not_found"}}
+            )
+        
+        # Importar el gestor de tokens
+        try:
+            from .credits_manager import token_manager
+        except ImportError:
+            from credits_manager import token_manager
+        
+        # Obtener historial de tokens (convertido a créditos para compatibilidad)
+        history = token_manager.get_user_token_history(user_id, limit)
+        
+        # Convertir formato de tokens a créditos para compatibilidad
+        legacy_history = []
+        if history:
+            for transaction in history:
+                legacy_transaction = {
+                    "id": transaction.get("id"),
+                    "credits": transaction.get("tokens"),  # Legacy: tokens as credits
+                    "transaction_type": transaction.get("transaction_type"),
+                    "reason": transaction.get("reason"),
+                    "api_key_id": transaction.get("api_key_id"),
+                    "created_at": transaction.get("created_at")
+                }
+                legacy_history.append(legacy_transaction)
+        
+        return {
+            "user_id": user_id,
+            "transactions": legacy_history or [],
+            "total_transactions": len(legacy_history) if legacy_history else 0,
+            "limit": limit,
+            "deprecated": True,
+            "note": "This endpoint is deprecated. Please use /v1/tokens/history instead."
+        }
+        
+    except Exception as e:
+        print(f"[CREDITS] Error getting credit history: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"message": "Internal server error", "type": "internal_error"}}
+        )
 
 if __name__ == "__main__":
     import uvicorn
