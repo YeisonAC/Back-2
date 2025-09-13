@@ -2407,37 +2407,51 @@ async def get_firewall_rules_stats(
     api_key_id: str = Depends(validate_api_key)
 ):
     """Get statistics for the authenticated user's firewall rules"""
-    user_id = getattr(request.state, "api_key_id", api_key_id)
-    
-    # Get user's rules
-    user_rules = user_rules_manager.get_user_rules(user_id, api_key_id)
-    
-    # Calculate statistics
-    total_rules = len(user_rules)
-    active_rules = len([r for r in user_rules if r.status == RuleStatus.ACTIVE])
-    inactive_rules = len([r for r in user_rules if r.status == RuleStatus.INACTIVE])
-    expired_rules = len([r for r in user_rules if r.status == RuleStatus.EXPIRED])
-    
-    # Count by rule type
-    rule_type_counts = {}
-    for rule in user_rules:
-        rule_type = rule.rule_type.value
-        rule_type_counts[rule_type] = rule_type_counts.get(rule_type, 0) + 1
-    
-    # Count by action
-    action_counts = {}
-    for rule in user_rules:
-        action = rule.action.value
-        action_counts[action] = action_counts.get(action, 0) + 1
-    
-    return {
-        "total_rules": total_rules,
-        "active_rules": active_rules,
-        "inactive_rules": inactive_rules,
-        "expired_rules": expired_rules,
-        "rule_type_distribution": rule_type_counts,
-        "action_distribution": action_counts
-    }
+    try:
+        user_id = getattr(request.state, "api_key_id", api_key_id)
+        print(f"[DEBUG] Getting stats for user_id: {user_id}, api_key_id: {api_key_id}")
+        
+        # Get user's rules
+        user_rules = user_rules_manager.get_user_rules(user_id, api_key_id)
+        print(f"[DEBUG] Found {len(user_rules)} rules for user")
+        
+        # Calculate statistics
+        total_rules = len(user_rules)
+        active_rules = len([r for r in user_rules if r.status == RuleStatus.ACTIVE])
+        inactive_rules = len([r for r in user_rules if r.status == RuleStatus.INACTIVE])
+        expired_rules = len([r for r in user_rules if r.status == RuleStatus.EXPIRED])
+        
+        print(f"[DEBUG] Stats - Total: {total_rules}, Active: {active_rules}, Inactive: {inactive_rules}, Expired: {expired_rules}")
+        
+        # Count by rule type
+        rule_type_counts = {}
+        for rule in user_rules:
+            rule_type = rule.rule_type.value
+            rule_type_counts[rule_type] = rule_type_counts.get(rule_type, 0) + 1
+        
+        # Count by action
+        action_counts = {}
+        for rule in user_rules:
+            action = rule.action.value
+            action_counts[action] = action_counts.get(action, 0) + 1
+        
+        result = {
+            "total_rules": total_rules,
+            "active_rules": active_rules,
+            "inactive_rules": inactive_rules,
+            "expired_rules": expired_rules,
+            "rule_type_distribution": rule_type_counts,
+            "action_distribution": action_counts
+        }
+        
+        print(f"[DEBUG] Returning stats result: {result}")
+        return result
+        
+    except Exception as e:
+        print(f"[ERROR] Exception in get_firewall_rules_stats: {str(e)}")
+        import traceback
+        print(f"[ERROR] Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch rule stats: {str(e)}")
 
 # -------- Token Management Endpoints --------
 

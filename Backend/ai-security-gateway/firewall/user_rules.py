@@ -97,7 +97,16 @@ class UserRulesManager:
         self.user_rules: Dict[str, List[str]] = {}  # user_id -> [rule_ids]
         self.api_key_rules: Dict[str, List[str]] = {}  # api_key_id -> [rule_ids]
         self._lock = threading.Lock()
-        self._load_rules()
+        
+        # Detectar si estamos en Vercel
+        self.is_vercel = os.environ.get('VERCEL') == '1'
+        
+        if self.is_vercel:
+            # En Vercel, usar almacenamiento en memoria
+            print("[UserRulesManager] Running in Vercel - using in-memory storage")
+        else:
+            # En local, intentar cargar desde archivo
+            self._load_rules()
     
     def _load_rules(self):
         """Load rules from storage file"""
@@ -126,6 +135,11 @@ class UserRulesManager:
     
     def _save_rules(self):
         """Save rules to storage file"""
+        if self.is_vercel:
+            # En Vercel, no guardar en archivo (almacenamiento en memoria)
+            print("[UserRulesManager] Skipping save in Vercel (in-memory storage)")
+            return
+            
         try:
             data = {
                 'rules': [rule.to_dict() for rule in self.rules.values()],
