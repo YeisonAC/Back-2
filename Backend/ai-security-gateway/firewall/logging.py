@@ -55,24 +55,42 @@ class FirewallLogger:
     
     def _setup_logging(self) -> None:
         """Setup Python logging configuration"""
-        # Create logs directory if it doesn't exist
-        log_dir = os.path.dirname(LOG_FILE)
-        if log_dir and not os.path.exists(log_dir):
-            os.makedirs(log_dir)
+        # Detectar si estamos en Vercel
+        is_vercel = os.environ.get('VERCEL', '').lower() == '1' or os.environ.get('AWS_LAMBDA_FUNCTION_NAME') is not None
         
-        # Configure logging
-        logging.basicConfig(
-            level=getattr(logging, LOG_LEVEL.upper()),
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                RotatingFileHandler(
-                    LOG_FILE,
-                    maxBytes=10*1024*1024,  # 10MB
-                    backupCount=5
-                ),
-                logging.StreamHandler()  # Also log to console
-            ]
-        )
+        if is_vercel:
+            # En Vercel/serverless, no usar archivo de log, solo console
+            logging.basicConfig(
+                level=getattr(logging, LOG_LEVEL.upper()),
+                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                handlers=[
+                    logging.StreamHandler()  # Solo log a console
+                ]
+            )
+            if DEBUG_MODE:
+                print("Firewall Logger initialized for Vercel (console only)")
+        else:
+            # En entorno local, usar archivo de log
+            # Create logs directory if it doesn't exist
+            log_dir = os.path.dirname(LOG_FILE)
+            if log_dir and not os.path.exists(log_dir):
+                os.makedirs(log_dir)
+            
+            # Configure logging
+            logging.basicConfig(
+                level=getattr(logging, LOG_LEVEL.upper()),
+                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                handlers=[
+                    RotatingFileHandler(
+                        LOG_FILE,
+                        maxBytes=10*1024*1024,  # 10MB
+                        backupCount=5
+                    ),
+                    logging.StreamHandler()  # Also log to console
+                ]
+            )
+            if DEBUG_MODE:
+                print("Firewall Logger initialized for local environment")
         
         self.logger = logging.getLogger('Firewall')
     
@@ -337,6 +355,13 @@ Firewall Security System
         Returns:
             bool: True if export successful
         """
+        # Detectar si estamos en Vercel
+        is_vercel = os.environ.get('VERCEL', '').lower() == '1' or os.environ.get('AWS_LAMBDA_FUNCTION_NAME') is not None
+        
+        if is_vercel:
+            self.logger.warning("Export events not available in Vercel environment (read-only filesystem)")
+            return False
+        
         try:
             with self._events_lock:
                 events_data = [asdict(event) for event in self._events]
