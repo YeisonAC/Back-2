@@ -20,6 +20,55 @@ try:
     ML_AVAILABLE = True
 except ImportError:
     ML_AVAILABLE = False
+    # Crear un placeholder para np para evitar errores de importación
+    class NumpyPlaceholder:
+        def array(self, data):
+            # Simplemente devolver los datos como lista cuando numpy no está disponible
+            return data if isinstance(data, list) else [data]
+        
+        def ndarray(self):
+            return list
+            
+        def __getattr__(self, name):
+            # Para cualquier otro atributo, devolver una función que no hace nada
+            def placeholder_method(*args, **kwargs):
+                return None
+            return placeholder_method
+    
+    np = NumpyPlaceholder()
+    # También crear placeholders para las otras dependencias
+    class JoblibPlaceholder:
+        def load(self, *args, **kwargs):
+            return None
+        def dump(self, *args, **kwargs):
+            return None
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: None
+    
+    class SklearnPlaceholder:
+        class IsolationForest:
+            def __init__(self, *args, **kwargs):
+                pass
+            def fit(self, *args, **kwargs):
+                pass
+            def decision_function(self, *args, **kwargs):
+                return [0.0]
+            def predict(self, *args, **kwargs):
+                return [0]
+        
+        class TfidfVectorizer:
+            def __init__(self, *args, **kwargs):
+                pass
+            def fit_transform(self, *args, **kwargs):
+                return []
+            def transform(self, *args, **kwargs):
+                return []
+        
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: None
+    
+    joblib = JoblibPlaceholder()
+    sklearn = SklearnPlaceholder()
 
 from .config import (
     ANOMALY_THRESHOLD,
@@ -321,7 +370,7 @@ class AIHeuristicsManager:
         
         return 0.0
     
-    def _features_to_vector(self, features: Dict[str, Any]) -> Optional[np.ndarray]:
+    def _features_to_vector(self, features: Dict[str, Any]) -> Optional[list]:
         """Convert features to vector for ML model"""
         if not ML_AVAILABLE or self._vectorizer is None:
             return None
