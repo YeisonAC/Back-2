@@ -15,6 +15,8 @@ from dotenv import load_dotenv
 from pathlib import Path
 from supabase import create_client, Client
 from dataclasses import dataclass
+import time
+from collections import defaultdict, deque
 
 # Importar funciones de API keys
 try:
@@ -47,6 +49,12 @@ load_dotenv(dotenv_path=Path(__file__).with_name('.env'))
 COMPLETION_MODEL = os.getenv("GROQ_COMPLETION_MODEL", "openai/gpt-oss-20b")
 CLASSIFIER_MODEL = os.getenv("GROQ_CLASSIFIER_MODEL", "openai/gpt-oss-20b")
 ENABLE_INTENT_LAYER = os.getenv("ENABLE_INTENT_LAYER", "true").lower() == "true"
+
+# Configuración de Playground
+PLAYGROUND_ENABLED = os.getenv("PLAYGROUND_ENABLED", "false").lower() == "true"
+PLAYGROUND_TOKEN = os.getenv("PLAYGROUND_TOKEN")
+PLAYGROUND_RATE_LIMIT_PER_MIN = int(os.getenv("PLAYGROUND_RATE_LIMIT_PER_MIN", "10"))
+PLAYGROUND_ALLOWED_ORIGINS = os.getenv("PLAYGROUND_ALLOWED_ORIGINS", "").split(",") if os.getenv("PLAYGROUND_ALLOWED_ORIGINS") else []
 
 # Variables de entorno específicas por tier
 L1_MINI_COMPLETION_MODEL = os.getenv("L1_MINI_COMPLETION_MODEL", "l1-mini")
@@ -629,6 +637,22 @@ except ImportError:
 
 # Instancia global del firewall real
 firewall = AIFirewall()
+
+# -------- Rate limiting simple por IP para Playground --------
+_ip_window: dict[str, deque[float]] = defaultdict(deque)
+_WINDOW_SECONDS = 60.0
+
+def _playground_allow_ip(ip: str) -> bool:
+    """Verifica si una IP puede acceder al playground basado en rate limiting"""
+    now = time()
+    q = _ip_window[ip]
+    # limpiar entradas viejas
+    while q and (now - q[0]) > _WINDOW_SECONDS:
+        q.popleft()
+    if len(q) >= max(1, PLAYGROUND_RATE_LIMIT_PER_MIN):
+        return False
+    q.append(now)
+    return True
 
 # Endpoints básicos
 @app.get("/")
@@ -2763,6 +2787,27 @@ async def get_credit_history(
             status_code=500,
             content={"error": {"message": "Internal server error", "type": "internal_error"}}
         )
+
+# -------- Playground (sin API Key) --------
+@app.post("/playground/chat")
+async def playground_chat(request: Request):
+    """Endpoint de playground para pruebas sin requerir API key"""
+    if not PLAYGROUND_ENABLED:
+        raise HTTPException(status_code=404, detail="Playground is disabled")
+    
+    # Verificar token de playground si está configurado
+    if PLAYGROUND_TOKEN:
+        tok = request.headers.get("X-Playground-Token") or request.headers.get("x-playground-token")
+        if not tok or tok != PLAYGROUND_TOKEN:
+            raise HTTPException(status_code=401, detail="Playground token required")
+    
+    # Verificar rate limiting por IP
+    client_ip = get_client_ip(request)
+    if not _playground_allow_ip(client_ip):
+        raise HTTPException(status_code=429, detail="Playground rate limit exceeded")
+    
+    # Delegar en el handler existente (sin validación de API key)
+    return await proxy_chat_completions(request)
 
 if __name__ == "__main__":
     import uvicorn
