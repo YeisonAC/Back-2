@@ -2533,6 +2533,58 @@ async def get_token_balance(
         )
 
 
+@app.get("/v1/user/tokens/balance", response_model=dict)
+async def get_user_token_balance(
+    request: Request,
+    user_id: str = Depends(get_current_user_id)
+):
+    """
+    Get current token balance and plan information for the authenticated user using JWT
+    This endpoint provides a user-centric approach to token management
+    """
+    try:
+        if not user_id:
+            return JSONResponse(
+                status_code=401,
+                content={"error": {"message": "User not authenticated", "type": "authentication_required"}}
+            )
+        
+        # Obtener información de tokens y plan directamente por user_id
+        token_info = get_remaining_tokens(user_id)
+        plan_info = get_user_plan(user_id)
+        
+        if token_info is None or plan_info is None:
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"message": "Token account not found for this user", "type": "account_not_found"}}
+            )
+        
+        return {
+            "user_id": user_id,
+            "tokens": {
+                "remaining_tokens": token_info["remaining_tokens"],
+                "tokens_used": token_info["tokens_used"],
+                "token_limit": token_info["token_limit"],
+                "usage_percentage": token_info["usage_percentage"]
+            },
+            "plan": {
+                "plan_name": plan_info["plan_name"],
+                "plan_id": plan_info["plan_id"],
+                "token_limit": plan_info["token_limit"],
+                "description": plan_info["description"]
+            },
+            "auth_method": "jwt",
+            "endpoint_type": "user_centric"
+        }
+        
+    except Exception as e:
+        print(f"[USER_TOKENS] Error getting user token balance: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"message": "Internal server error", "type": "internal_error"}}
+        )
+
+
 @app.get("/v1/credits/balance", response_model=dict)
 async def get_credit_balance(
     request: Request,
