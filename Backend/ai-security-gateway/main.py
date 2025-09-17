@@ -2553,6 +2553,40 @@ async def get_user_token_balance(
         token_info = get_remaining_tokens(user_id)
         plan_info = get_user_plan(user_id)
         
+        # Si el usuario no existe, crearlo automáticamente con plan Free
+        if token_info is None or plan_info is None:
+            print(f"[USER_TOKENS] Creating new user account for {user_id} with Free plan")
+            
+            # Importar el TokenManager para crear la suscripción
+            from credits_manager import token_manager
+            
+            # Crear suscripción con plan Free (plan_id = 1)
+            try:
+                create_result = token_manager.create_user_subscription(
+                    user_id=user_id,
+                    plan_id=1,  # Plan Free
+                    owner_type="user"
+                )
+                
+                if create_result["success"]:
+                    print(f"[USER_TOKENS] Successfully created user {user_id}")
+                    # Obtener la información recién creada
+                    token_info = get_remaining_tokens(user_id)
+                    plan_info = get_user_plan(user_id)
+                else:
+                    print(f"[USER_TOKENS] Failed to create user {user_id}: {create_result.get('error')}")
+                    return JSONResponse(
+                        status_code=500,
+                        content={"error": {"message": "Failed to create user account", "type": "account_creation_failed"}}
+                    )
+            except Exception as create_error:
+                print(f"[USER_TOKENS] Error creating user {user_id}: {create_error}")
+                return JSONResponse(
+                    status_code=500,
+                    content={"error": {"message": "Error creating user account", "type": "account_creation_error"}}
+                )
+        
+        # Verificar nuevamente que tenemos la información
         if token_info is None or plan_info is None:
             return JSONResponse(
                 status_code=404,

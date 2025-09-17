@@ -11,7 +11,7 @@ from supabase import create_client, Client
 from supabase_client import get_supabase
 
 # Environment variables
-TOKENS_TABLE = os.getenv("TOKENS_TABLE", "user_tokens")
+SUBSCRIPTIONS_TABLE = os.getenv("SUBSCRIPTIONS_TABLE", "suscriptions")
 PLANS_TABLE = os.getenv("PLANS_TABLE", "plans")
 TOKEN_TRANSACTIONS_TABLE = os.getenv("TOKEN_TRANSACTIONS_TABLE", "token_transactions")
 
@@ -30,18 +30,18 @@ PLAN_CONFIGS = {
 
 class TokenManager:
     """
-    Manages user tokens and consumption logic with plan-based limits
+    Manages user tokens and consumption logic with subscription-based limits
     """
     
     def __init__(self):
         self.supabase = get_supabase()
-        self.tokens_table = TOKENS_TABLE
+        self.subscriptions_table = SUBSCRIPTIONS_TABLE
         self.plans_table = PLANS_TABLE
         self.token_transactions_table = TOKEN_TRANSACTIONS_TABLE
     
     def get_user_plan(self, user_id: str) -> Optional[Dict[str, Any]]:
         """
-        Get user's plan information
+        Get user's plan information from subscriptions table
         
         Args:
             user_id: The user's ID
@@ -51,28 +51,36 @@ class TokenManager:
         """
         if not self.supabase:
             return None
-            
+        
         try:
-            # Get user with plan information
-            result = self.supabase.table(self.tokens_table).select("*, plans(*)").eq("user_id", user_id).single().execute()
+            # Get user subscription with plan information
+            result = self.supabase.table(self.subscriptions_table).select("*, plans(*)").eq("owner_id", user_id).eq("owner_type", "user").eq("status", "active").single().execute()
             
             if result.data:
-                plan_info = result.data.get("plans", {})
+                subscription = result.data
+                plan_info = subscription.get("plans", {})
                 return {
-                    "plan_id": result.data.get("plan_id"),
+                    "plan_id": subscription.get("plan_id"),
                     "plan_name": plan_info.get("name", "Free"),
                     "token_limit": plan_info.get("token_limit", 1000),
-                    "description": plan_info.get("description", "Plan gratuito")
+                    "description": plan_info.get("description", "Plan gratuito"),
+                    "subscription_id": subscription.get("id"),
+                    "status": subscription.get("status"),
+                    "current_period_end": subscription.get("current_period_end"),
+                    "remaining_credits": subscription.get("remaining_credits", 0),
+                    "total_credits": subscription.get("total_credits", 0),
+                    "reset_date": subscription.get("reset_date")
                 }
-            return None
-            
+            else:
+                return None
+                
         except Exception as e:
-            print(f"[TOKENS] Error getting user plan: {e}")
+            print(f"[TOKENS] Error getting user subscription: {e}")
             return None
     
     def get_user_tokens_used(self, user_id: str) -> Optional[int]:
         """
-        Get current token usage for a user
+        Get current token usage for a user based on subscription
         
         Args:
             user_id: The user's ID
@@ -84,10 +92,14 @@ class TokenManager:
             return None
             
         try:
-            result = self.supabase.table(self.tokens_table).select("tokens_used").eq("user_id", user_id).single().execute()
+            # Get subscription to calculate tokens used
+            result = self.supabase.table(self.subscriptions_table).select("total_credits, remaining_credits").eq("owner_id", user_id).eq("owner_type", "user").eq("status", "active").single().execute()
             
             if result.data:
-                return result.data.get("tokens_used", 0)
+                total_credits = result.data.get("total_credits", 0)
+                remaining_credits = result.data.get("remaining_credits", 0)
+                tokens_used = max(0, total_credits - remaining_credits)
+                return tokens_used
             return None
             
         except Exception as e:
@@ -96,7 +108,7 @@ class TokenManager:
     
     def get_remaining_tokens(self, user_id: str) -> Optional[Dict[str, Any]]:
         """
-        Get remaining tokens for a user based on their plan
+        Get remaining tokens for a user based on their subscription
         
         Args:
             user_id: The user's ID
@@ -105,19 +117,27 @@ class TokenManager:
             Dict with remaining tokens and plan info
         """
         user_plan = self.get_user_plan(user_id)
-        tokens_used = self.get_user_tokens_used(user_id)
         
-        if not user_plan or tokens_used is None:
+        if not user_plan:
             return None
         
-        remaining = max(0, user_plan["token_limit"] - tokens_used)
+        # Use remaining_credits from subscription
+        remaining_credits = user_plan.get("remaining_credits", 0)
+        total_credits = user_plan.get("total_credits", 0)
+        tokens_used = max(0, total_credits - remaining_credits)
         
         return {
-            "remaining_tokens": remaining,
+            "remaining_tokens": remaining_credits,
             "tokens_used": tokens_used,
-            "token_limit": user_plan["token_limit"],
+            "token_limit": total_credits,
             "plan_name": user_plan["plan_name"],
-            "usage_percentage": round((tokens_used / user_plan["token_limit"]) * 100, 2) if user_plan["token_limit"] > 0 else 0
+            "usage_percentage": round((tokens_used / total_credits) * 100, 2) if total_credits > 0 else 0,
+            "subscription_info": {
+                "subscription_id": user_plan.get("subscription_id"),
+                "status": user_plan.get("status"),
+                "current_period_end": user_plan.get("current_period_end"),
+                "reset_date": user_plan.get("reset_date")
+            }
         }
     
     def check_token_limit_before_request(self, user_id: str, estimated_tokens: int) -> Dict[str, Any]:
@@ -155,7 +175,7 @@ class TokenManager:
     
     def consume_tokens(self, user_id: str, tokens: int, api_key_id: str = None) -> Dict[str, Any]:
         """
-        Consume tokens for a user
+        Consume tokens for a user by updating remaining_credits in subscriptions table
         
         Args:
             user_id: The user's ID
@@ -177,27 +197,26 @@ class TokenManager:
             if not limit_check["success"]:
                 return limit_check
             
-            # Get current token usage
-            current_usage = self.get_user_tokens_used(user_id)
-            if current_usage is None:
-                return {"success": False, "error": "User not found"}
+            # Get current subscription info
+            subscription_info = self.get_user_plan(user_id)
+            if not subscription_info:
+                return {"success": False, "error": "User subscription not found"}
             
-            # Calculate new usage
-            new_usage = current_usage + tokens
+            # Calculate new remaining credits
+            current_remaining = subscription_info.get("remaining_credits", 0)
+            new_remaining = max(0, current_remaining - tokens)
             
-            # Update token usage in database
+            # Update remaining_credits in subscriptions table
             update_data = {
-                "tokens_used": new_usage,
+                "remaining_credits": new_remaining,
                 "updated_at": datetime.now(timezone.utc).isoformat()
             }
             
-            if api_key_id:
-                update_data["last_api_key_used"] = api_key_id
-            
-            result = self.supabase.table(self.tokens_table).update(update_data).eq("user_id", user_id).execute()
+            subscription_id = subscription_info.get("subscription_id")
+            result = self.supabase.table(self.subscriptions_table).update(update_data).eq("id", subscription_id).execute()
             
             if result.data:
-                print(f"[TOKENS] Consumed {tokens} tokens from user {user_id}. Total used: {new_usage}")
+                print(f"[TOKENS] Consumed {tokens} tokens from user {user_id}. Remaining: {new_remaining}")
                 
                 # Record transaction
                 self._record_token_transaction(user_id, tokens, "consumption", api_key_id)
@@ -206,12 +225,11 @@ class TokenManager:
                 return {
                     "success": True,
                     "tokens_consumed": tokens,
-                    "total_tokens_used": new_usage,
-                    "remaining_tokens": remaining_info["remaining_tokens"] if remaining_info else 0,
+                    "remaining_tokens": new_remaining,
                     "plan_info": remaining_info
                 }
             else:
-                return {"success": False, "error": "Failed to update token usage"}
+                return {"success": False, "error": "Failed to update subscription credits"}
             
         except Exception as e:
             print(f"[TOKENS] Error consuming tokens: {e}")
@@ -219,7 +237,7 @@ class TokenManager:
     
     def add_tokens_to_user(self, user_id: str, tokens: int, reason: str = None, api_key_id: str = None) -> Dict[str, Any]:
         """
-        Add tokens to a user (for admin operations or plan upgrades)
+        Add tokens to a user by updating remaining_credits in subscriptions table
         
         Args:
             user_id: The user's ID
@@ -234,25 +252,28 @@ class TokenManager:
             return {"success": False, "error": "Supabase not available"}
         
         try:
-            # Get current token usage
-            current_usage = self.get_user_tokens_used(user_id)
-            if current_usage is None:
-                return {"success": False, "error": "User not found"}
+            # Get current subscription info
+            subscription_info = self.get_user_plan(user_id)
+            if not subscription_info:
+                return {"success": False, "error": "User subscription not found"}
             
-            # Calculate new usage (ensure it doesn't go below 0)
-            new_usage = max(0, current_usage + tokens)
-            actual_tokens_added = new_usage - current_usage
+            # Calculate new remaining credits
+            current_remaining = subscription_info.get("remaining_credits", 0)
+            total_credits = subscription_info.get("total_credits", 0)
+            new_remaining = max(0, min(total_credits, current_remaining + tokens))
+            actual_tokens_added = new_remaining - current_remaining
             
-            # Update token usage in database
+            # Update remaining_credits in subscriptions table
             update_data = {
-                "tokens_used": new_usage,
+                "remaining_credits": new_remaining,
                 "updated_at": datetime.now(timezone.utc).isoformat()
             }
             
-            result = self.supabase.table(self.tokens_table).update(update_data).eq("user_id", user_id).execute()
+            subscription_id = subscription_info.get("subscription_id")
+            result = self.supabase.table(self.subscriptions_table).update(update_data).eq("id", subscription_id).execute()
             
             if result.data:
-                print(f"[TOKENS] Added {actual_tokens_added} tokens to user {user_id}. New usage: {new_usage}")
+                print(f"[TOKENS] Added {actual_tokens_added} tokens to user {user_id}. New remaining: {new_remaining}")
                 
                 # Record transaction
                 self._record_token_transaction(user_id, actual_tokens_added, "adjustment", api_key_id, reason)
@@ -261,13 +282,12 @@ class TokenManager:
                 return {
                     "success": True,
                     "tokens_added": actual_tokens_added,
-                    "total_tokens_used": new_usage,
-                    "remaining_tokens": remaining_info["remaining_tokens"] if remaining_info else 0,
+                    "remaining_tokens": new_remaining,
                     "plan_info": remaining_info,
                     "reason": reason
                 }
             else:
-                return {"success": False, "error": "Failed to update token usage"}
+                return {"success": False, "error": "Failed to update subscription credits"}
             
         except Exception as e:
             print(f"[TOKENS] Error adding tokens: {e}")
@@ -323,6 +343,142 @@ class TokenManager:
         except Exception as e:
             print(f"[TOKENS] Error getting token history: {e}")
             return None
+    
+    def create_user_subscription(self, user_id: str, plan_id: int = 1, owner_type: str = "user") -> Dict[str, Any]:
+        """
+        Create a new subscription for a user with Free plan by default
+        
+        Args:
+            user_id: The user's ID
+            plan_id: The plan ID (1 for Free, 2 for Pro)
+            owner_type: Type of owner (user, organization, etc.)
+            
+        Returns:
+            Dict with success status and subscription info
+        """
+        if not self.supabase:
+            return {"success": False, "error": "Supabase not available"}
+        
+        try:
+            # Get plan information
+            plan_result = self.supabase.table(self.plans_table).select("*").eq("id", plan_id).single().execute()
+            
+            if not plan_result.data:
+                return {"success": False, "error": "Plan not found"}
+            
+            plan_info = plan_result.data
+            token_limit = plan_info.get("token_limit", 1000)
+            
+            # Calculate dates
+            now = datetime.now(timezone.utc)
+            current_period_end = now.replace(year=now.year + 1) if plan_id == 2 else now.replace(month=now.month + 1)  # Pro: 1 year, Free: 1 month
+            reset_date = now.replace(day=1, month=now.month + 1)  # Reset on first day of next month
+            
+            # Create subscription
+            subscription_data = {
+                "owner_type": owner_type,
+                "owner_id": user_id,
+                "plan_id": plan_id,
+                "status": "active",
+                "current_period_end": current_period_end.isoformat(),
+                "created_at": now.isoformat(),
+                "remaining_credits": token_limit,  # Start with full credits
+                "total_credits": token_limit,
+                "reset_date": reset_date.isoformat()
+            }
+            
+            result = self.supabase.table(self.subscriptions_table).insert(subscription_data).execute()
+            
+            if result.data:
+                subscription_id = result.data[0].get("id")
+                print(f"[SUBSCRIPTION] Created subscription {subscription_id} for user {user_id} with plan {plan_info.get('name', 'Free')}")
+                
+                return {
+                    "success": True,
+                    "subscription_id": subscription_id,
+                    "plan_name": plan_info.get("name", "Free"),
+                    "token_limit": token_limit,
+                    "remaining_credits": token_limit,
+                    "total_credits": token_limit,
+                    "status": "active",
+                    "current_period_end": current_period_end.isoformat(),
+                    "reset_date": reset_date.isoformat()
+                }
+            else:
+                return {"success": False, "error": "Failed to create subscription"}
+                
+        except Exception as e:
+            print(f"[SUBSCRIPTION] Error creating subscription: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def upgrade_user_subscription(self, user_id: str, new_plan_id: int) -> Dict[str, Any]:
+        """
+        Upgrade user subscription to a new plan
+        
+        Args:
+            user_id: The user's ID
+            new_plan_id: The new plan ID (1 for Free, 2 for Pro)
+            
+        Returns:
+            Dict with success status and updated subscription info
+        """
+        if not self.supabase:
+            return {"success": False, "error": "Supabase not available"}
+        
+        try:
+            # Get current subscription
+            current_subscription = self.get_user_plan(user_id)
+            if not current_subscription:
+                return {"success": False, "error": "No active subscription found"}
+            
+            # Get new plan information
+            plan_result = self.supabase.table(self.plans_table).select("*").eq("id", new_plan_id).single().execute()
+            
+            if not plan_result.data:
+                return {"success": False, "error": "New plan not found"}
+            
+            new_plan_info = plan_result.data
+            new_token_limit = new_plan_info.get("token_limit", 1000)
+            
+            # Calculate dates
+            now = datetime.now(timezone.utc)
+            current_period_end = now.replace(year=now.year + 1) if new_plan_id == 2 else now.replace(month=now.month + 1)
+            reset_date = now.replace(day=1, month=now.month + 1)
+            
+            # Update subscription
+            subscription_id = current_subscription.get("subscription_id")
+            update_data = {
+                "plan_id": new_plan_id,
+                "status": "active",
+                "current_period_end": current_period_end.isoformat(),
+                "updated_at": now.isoformat(),
+                "total_credits": new_token_limit,
+                "remaining_credits": new_token_limit,  # Reset to full credits on upgrade
+                "reset_date": reset_date.isoformat()
+            }
+            
+            result = self.supabase.table(self.subscriptions_table).update(update_data).eq("id", subscription_id).execute()
+            
+            if result.data:
+                print(f"[SUBSCRIPTION] Upgraded user {user_id} to plan {new_plan_info.get('name', 'Unknown')}")
+                
+                return {
+                    "success": True,
+                    "subscription_id": subscription_id,
+                    "plan_name": new_plan_info.get("name", "Unknown"),
+                    "token_limit": new_token_limit,
+                    "remaining_credits": new_token_limit,
+                    "total_credits": new_token_limit,
+                    "status": "active",
+                    "current_period_end": current_period_end.isoformat(),
+                    "reset_date": reset_date.isoformat()
+                }
+            else:
+                return {"success": False, "error": "Failed to upgrade subscription"}
+                
+        except Exception as e:
+            print(f"[SUBSCRIPTION] Error upgrading subscription: {e}")
+            return {"success": False, "error": str(e)}
     
     # Legacy methods for backward compatibility
     def get_user_credits(self, user_id: str) -> Optional[int]:
