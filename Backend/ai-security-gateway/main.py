@@ -2126,118 +2126,7 @@ async def mgmt_delete_key(request: Request, key_id: str):
 
 # -------- User Firewall Rules Management --------
 
-@app.get("/v1/firewall/rules/types", response_model=RuleTypesResponse)
-async def get_firewall_rule_types():
-    """Get available firewall rule types and their configuration options"""
-    rule_types_info = [
-        {
-            "type": "ip_whitelist",
-            "name": "IP Whitelist",
-            "description": "Allow requests only from specific IP addresses",
-            "conditions_schema": {
-                "ips": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "List of allowed IP addresses"
-                }
-            }
-        },
-        {
-            "type": "ip_blacklist",
-            "name": "IP Blacklist",
-            "description": "Block requests from specific IP addresses",
-            "conditions_schema": {
-                "ips": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "List of blocked IP addresses"
-                }
-            }
-        },
-        {
-            "type": "country_block",
-            "name": "Country Block",
-            "description": "Block requests from specific countries",
-            "conditions_schema": {
-                "countries": {
-                    "type": "array",
-                    "items": {"type": "string", "maxLength": 2},
-                    "description": "List of 2-letter country codes to block"
-                }
-            }
-        },
-        {
-            "type": "rate_limit",
-            "name": "Rate Limit",
-            "description": "Limit number of requests per time period",
-            "conditions_schema": {
-                "requests_per_minute": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Maximum requests per minute"
-                }
-            }
-        },
-        {
-            "type": "pattern_block",
-            "name": "Pattern Block",
-            "description": "Block requests containing specific patterns",
-            "conditions_schema": {
-                "patterns": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "List of patterns to block in request content"
-                }
-            }
-        },
-        {
-            "type": "time_block",
-            "name": "Time Block",
-            "description": "Block requests during specific time ranges",
-            "conditions_schema": {
-                "start_time": {
-                    "type": "string",
-                    "pattern": "^([01]?[0-9]|2[0-3]):[0-5][0-9]$",
-                    "description": "Start time in HH:MM format"
-                },
-                "end_time": {
-                    "type": "string",
-                    "pattern": "^([01]?[0-9]|2[0-3]):[0-5][0-9]$",
-                    "description": "End time in HH:MM format"
-                }
-            }
-        },
-        {
-            "type": "user_agent_block",
-            "name": "User Agent Block",
-            "description": "Block requests from specific user agents",
-            "conditions_schema": {
-                "user_agents": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "List of user agent patterns to block"
-                }
-            }
-        },
-        {
-            "type": "custom_ai_rule",
-            "name": "Custom AI Rule",
-            "description": "Custom rules using AI pattern detection",
-            "conditions_schema": {
-                "prompt_patterns": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "List of prompt patterns to detect"
-                }
-            }
-        }
-    ]
-    
-    return RuleTypesResponse(
-        rule_types=rule_types_info,
-        actions=[action.value for action in RuleAction],
-        statuses=[status.value for status in RuleStatus]
-    )
+# Agregar estas funciones a tus endpoints existentes
 
 @app.post("/v1/firewall/rules", response_model=FirewallRuleResponse)
 async def create_firewall_rule(
@@ -2246,7 +2135,7 @@ async def create_firewall_rule(
     api_key_id: str = Depends(validate_api_key)
 ):
     """Create a new firewall rule for the authenticated user's API key"""
-    user_id = getattr(request.state, "api_key_id", api_key_id)  # Use API key ID as user ID
+    user_id = getattr(request.state, "api_key_id", api_key_id)
     
     # Validate rule type
     try:
@@ -2273,6 +2162,9 @@ async def create_firewall_rule(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid expires_at format. Use ISO datetime format.")
     
+    # Extract value from conditions for the new field
+    extracted_value = extract_value_from_conditions(rule_type, body.conditions)
+    
     # Create the rule
     rule = UserFirewallRule(
         id="",  # Will be generated
@@ -2284,6 +2176,7 @@ async def create_firewall_rule(
         action=action,
         status=RuleStatus.ACTIVE,
         conditions=body.conditions,
+        value=extracted_value,  # Nuevo campo
         priority=body.priority or 0,
         expires_at=expires_at
     )
@@ -2296,53 +2189,6 @@ async def create_firewall_rule(
         raise HTTPException(status_code=500, detail="Failed to create rule")
     
     return FirewallRuleResponse(**created_rule.to_dict())
-
-@app.get("/v1/firewall/rules", response_model=FirewallRulesResponse)
-async def get_firewall_rules(
-    request: Request,
-    page: int = 1,
-    page_size: int = 20,
-    api_key_id: str = Depends(validate_api_key)
-):
-    """Get all firewall rules for the authenticated user's API key"""
-    user_id = getattr(request.state, "api_key_id", api_key_id)
-    
-    # Get rules for this user and API key
-    rules = user_rules_manager.get_user_rules(user_id, api_key_id)
-    
-    # Paginate
-    total = len(rules)
-    start = (page - 1) * page_size
-    end = start + page_size
-    paginated_rules = rules[start:end]
-    
-    rule_responses = [FirewallRuleResponse(**rule.to_dict()) for rule in paginated_rules]
-    
-    return FirewallRulesResponse(
-        rules=rule_responses,
-        total=total,
-        page=page,
-        page_size=page_size
-    )
-
-@app.get("/v1/firewall/rules/{rule_id}", response_model=FirewallRuleResponse)
-async def get_firewall_rule(
-    rule_id: str,
-    request: Request,
-    api_key_id: str = Depends(validate_api_key)
-):
-    """Get a specific firewall rule by ID"""
-    user_id = getattr(request.state, "api_key_id", api_key_id)
-    
-    rule = user_rules_manager.get_rule(rule_id)
-    if not rule:
-        raise HTTPException(status_code=404, detail="Rule not found")
-    
-    # Check if rule belongs to this user
-    if rule.user_id != user_id or rule.api_key_id != api_key_id:
-        raise HTTPException(status_code=403, detail="Access denied")
-    
-    return FirewallRuleResponse(**rule.to_dict())
 
 @app.put("/v1/firewall/rules/{rule_id}", response_model=FirewallRuleResponse)
 async def update_firewall_rule(
@@ -2385,6 +2231,11 @@ async def update_firewall_rule(
         if validation_errors:
             raise HTTPException(status_code=400, detail={"errors": validation_errors})
         updates["conditions"] = body.conditions
+        
+        # Update the value field when conditions change
+        extracted_value = extract_value_from_conditions(existing_rule.rule_type, body.conditions)
+        updates["value"] = extracted_value
+        
     if body.priority is not None:
         updates["priority"] = body.priority
     if body.expires_at is not None:
@@ -2400,82 +2251,451 @@ async def update_firewall_rule(
     
     return FirewallRuleResponse(**updated_rule.to_dict())
 
-@app.delete("/v1/firewall/rules/{rule_id}")
-async def delete_firewall_rule(
-    rule_id: str,
+# Endpoint adicional para buscar reglas por valor
+@app.get("/v1/firewall/rules/search")
+async def search_firewall_rules(
     request: Request,
+    q: str,  # Query parameter para buscar
+    rule_type: Optional[str] = None,
     api_key_id: str = Depends(validate_api_key)
 ):
-    """Delete a firewall rule"""
+    """Search firewall rules by value or conditions"""
     user_id = getattr(request.state, "api_key_id", api_key_id)
     
-    # Get existing rule
-    existing_rule = user_rules_manager.get_rule(rule_id)
-    if not existing_rule:
-        raise HTTPException(status_code=404, detail="Rule not found")
-    
-    # Check ownership
-    if existing_rule.user_id != user_id or existing_rule.api_key_id != api_key_id:
-        raise HTTPException(status_code=403, detail="Access denied")
-    
-    # Delete the rule
-    success = user_rules_manager.delete_rule(rule_id)
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to delete rule")
-    
-    return {"message": "Rule deleted successfully"}
+    try:
+        # Base query
+        query = user_rules_manager.supabase.table("firewall_rules")\
+            .select("*")\
+            .eq("user_id", user_id)\
+            .eq("api_key_id", api_key_id)
+        
+        # Add rule type filter if specified
+        if rule_type:
+            query = query.eq("rule_type", rule_type)
+        
+        # Search in value field (JSONB contains query)
+        # This will work for both single values and arrays
+        query = query.or_(f'value.cs."{q}",name.ilike.%{q}%,description.ilike.%{q}%')
+        
+        result = query.execute()
+        
+        rules = []
+        for rule_data in result.data:
+            rule = user_rules_manager._dict_to_rule(rule_data)
+            if rule:
+                rules.append(FirewallRuleResponse(**rule.to_dict()))
+        
+        return {
+            "rules": rules,
+            "total": len(rules),
+            "query": q,
+            "rule_type": rule_type
+        }
+        
+    except Exception as e:
+        print(f"Error searching rules: {str(e)}")
+        raise HTTPException(status_code=500, detail="Search failed")
 
-@app.get("/v1/firewall/rules/stats")
-async def get_firewall_rules_stats(
+# Endpoint para obtener reglas por tipo específico
+@app.get("/v1/firewall/rules/by-type/{rule_type}")
+async def get_rules_by_type(
+    rule_type: str,
     request: Request,
     api_key_id: str = Depends(validate_api_key)
 ):
-    """Get statistics for the authenticated user's firewall rules"""
+    """Get rules filtered by type"""
+    user_id = getattr(request.state, "api_key_id", api_key_id)
+    
     try:
-        user_id = getattr(request.state, "api_key_id", api_key_id)
-        print(f"[DEBUG] Getting stats for user_id: {user_id}, api_key_id: {api_key_id}")
+        # Validate rule type
+        RuleType(rule_type)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid rule type: {rule_type}")
+    
+    try:
+        result = user_rules_manager.supabase.table("firewall_rules")\
+            .select("*")\
+            .eq("user_id", user_id)\
+            .eq("api_key_id", api_key_id)\
+            .eq("rule_type", rule_type)\
+            .order("priority", desc=True)\
+            .execute()
         
-        # Get user's rules
-        user_rules = user_rules_manager.get_user_rules(user_id, api_key_id)
-        print(f"[DEBUG] Found {len(user_rules)} rules for user")
+        rules = []
+        for rule_data in result.data:
+            rule = user_rules_manager._dict_to_rule(rule_data)
+            if rule:
+                rules.append(FirewallRuleResponse(**rule.to_dict()))
         
-        # Calculate statistics
-        total_rules = len(user_rules)
-        active_rules = len([r for r in user_rules if r.status == RuleStatus.ACTIVE])
-        inactive_rules = len([r for r in user_rules if r.status == RuleStatus.INACTIVE])
-        expired_rules = len([r for r in user_rules if r.status == RuleStatus.EXPIRED])
-        
-        print(f"[DEBUG] Stats - Total: {total_rules}, Active: {active_rules}, Inactive: {inactive_rules}, Expired: {expired_rules}")
-        
-        # Count by rule type
-        rule_type_counts = {}
-        for rule in user_rules:
-            rule_type = rule.rule_type.value
-            rule_type_counts[rule_type] = rule_type_counts.get(rule_type, 0) + 1
-        
-        # Count by action
-        action_counts = {}
-        for rule in user_rules:
-            action = rule.action.value
-            action_counts[action] = action_counts.get(action, 0) + 1
-        
-        result = {
-            "total_rules": total_rules,
-            "active_rules": active_rules,
-            "inactive_rules": inactive_rules,
-            "expired_rules": expired_rules,
-            "rule_type_distribution": rule_type_counts,
-            "action_distribution": action_counts
+        return {
+            "rules": rules,
+            "total": len(rules),
+            "rule_type": rule_type
         }
         
-        print(f"[DEBUG] Returning stats result: {result}")
-        return result
-        
     except Exception as e:
-        print(f"[ERROR] Exception in get_firewall_rules_stats: {str(e)}")
-        import traceback
-        print(f"[ERROR] Traceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch rule stats: {str(e)}")
+        print(f"Error getting rules by type: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch rules by type")
+
+# Inicialización (agrega esto a tu código principal)
+from supabase import create_client
+import os
+
+# Inicializar el manager con tus credenciales de Supabase
+user_rules_manager = UserRulesManager(
+    supabase_url=os.getenv("SUPABASE_URL"),
+    supabase_key=os.getenv("SUPABASE_ANON_KEY")
+)
+# @app.get("/v1/firewall/rules/types", response_model=RuleTypesResponse)
+# async def get_firewall_rule_types():
+#     """Get available firewall rule types and their configuration options"""
+#     rule_types_info = [
+#         {
+#             "type": "ip_whitelist",
+#             "name": "IP Whitelist",
+#             "description": "Allow requests only from specific IP addresses",
+#             "conditions_schema": {
+#                 "ips": {
+#                     "type": "array",
+#                     "items": {"type": "string"},
+#                     "description": "List of allowed IP addresses"
+#                 }
+#             }
+#         },
+#         {
+#             "type": "ip_blacklist",
+#             "name": "IP Blacklist",
+#             "description": "Block requests from specific IP addresses",
+#             "conditions_schema": {
+#                 "ips": {
+#                     "type": "array",
+#                     "items": {"type": "string"},
+#                     "description": "List of blocked IP addresses"
+#                 }
+#             }
+#         },
+#         {
+#             "type": "country_block",
+#             "name": "Country Block",
+#             "description": "Block requests from specific countries",
+#             "conditions_schema": {
+#                 "countries": {
+#                     "type": "array",
+#                     "items": {"type": "string", "maxLength": 2},
+#                     "description": "List of 2-letter country codes to block"
+#                 }
+#             }
+#         },
+#         {
+#             "type": "rate_limit",
+#             "name": "Rate Limit",
+#             "description": "Limit number of requests per time period",
+#             "conditions_schema": {
+#                 "requests_per_minute": {
+#                     "type": "integer",
+#                     "minimum": 1,
+#                     "description": "Maximum requests per minute"
+#                 }
+#             }
+#         },
+#         {
+#             "type": "pattern_block",
+#             "name": "Pattern Block",
+#             "description": "Block requests containing specific patterns",
+#             "conditions_schema": {
+#                 "patterns": {
+#                     "type": "array",
+#                     "items": {"type": "string"},
+#                     "description": "List of patterns to block in request content"
+#                 }
+#             }
+#         },
+#         {
+#             "type": "time_block",
+#             "name": "Time Block",
+#             "description": "Block requests during specific time ranges",
+#             "conditions_schema": {
+#                 "start_time": {
+#                     "type": "string",
+#                     "pattern": "^([01]?[0-9]|2[0-3]):[0-5][0-9]$",
+#                     "description": "Start time in HH:MM format"
+#                 },
+#                 "end_time": {
+#                     "type": "string",
+#                     "pattern": "^([01]?[0-9]|2[0-3]):[0-5][0-9]$",
+#                     "description": "End time in HH:MM format"
+#                 }
+#             }
+#         },
+#         {
+#             "type": "user_agent_block",
+#             "name": "User Agent Block",
+#             "description": "Block requests from specific user agents",
+#             "conditions_schema": {
+#                 "user_agents": {
+#                     "type": "array",
+#                     "items": {"type": "string"},
+#                     "description": "List of user agent patterns to block"
+#                 }
+#             }
+#         },
+#         {
+#             "type": "custom_ai_rule",
+#             "name": "Custom AI Rule",
+#             "description": "Custom rules using AI pattern detection",
+#             "conditions_schema": {
+#                 "prompt_patterns": {
+#                     "type": "array",
+#                     "items": {"type": "string"},
+#                     "description": "List of prompt patterns to detect"
+#                 }
+#             }
+#         }
+#     ]
+    
+#     return RuleTypesResponse(
+#         rule_types=rule_types_info,
+#         actions=[action.value for action in RuleAction],
+#         statuses=[status.value for status in RuleStatus]
+#     )
+
+# @app.post("/v1/firewall/rules", response_model=FirewallRuleResponse)
+# async def create_firewall_rule(
+#     request: Request,
+#     body: CreateFirewallRuleRequest,
+#     api_key_id: str = Depends(validate_api_key)
+# ):
+#     """Create a new firewall rule for the authenticated user's API key"""
+#     user_id = getattr(request.state, "api_key_id", api_key_id)  # Use API key ID as user ID
+    
+#     # Validate rule type
+#     try:
+#         rule_type = RuleType(body.rule_type)
+#     except ValueError:
+#         raise HTTPException(status_code=400, detail=f"Invalid rule type: {body.rule_type}")
+    
+#     # Validate action
+#     try:
+#         action = RuleAction(body.action)
+#     except ValueError:
+#         raise HTTPException(status_code=400, detail=f"Invalid action: {body.action}")
+    
+#     # Validate conditions
+#     validation_errors = user_rules_manager.validate_rule_conditions(rule_type, body.conditions)
+#     if validation_errors:
+#         raise HTTPException(status_code=400, detail={"errors": validation_errors})
+    
+#     # Parse expiration date
+#     expires_at = None
+#     if body.expires_at:
+#         try:
+#             expires_at = datetime.fromisoformat(body.expires_at.replace('Z', '+00:00'))
+#         except ValueError:
+#             raise HTTPException(status_code=400, detail="Invalid expires_at format. Use ISO datetime format.")
+    
+#     # Create the rule
+#     rule = UserFirewallRule(
+#         id="",  # Will be generated
+#         user_id=user_id,
+#         api_key_id=api_key_id,
+#         name=body.name,
+#         description=body.description,
+#         rule_type=rule_type,
+#         action=action,
+#         status=RuleStatus.ACTIVE,
+#         conditions=body.conditions,
+#         priority=body.priority or 0,
+#         expires_at=expires_at
+#     )
+    
+#     # Save the rule
+#     rule_id = user_rules_manager.create_rule(rule)
+#     created_rule = user_rules_manager.get_rule(rule_id)
+    
+#     if not created_rule:
+#         raise HTTPException(status_code=500, detail="Failed to create rule")
+    
+#     return FirewallRuleResponse(**created_rule.to_dict())
+
+# @app.get("/v1/firewall/rules", response_model=FirewallRulesResponse)
+# async def get_firewall_rules(
+#     request: Request,
+#     page: int = 1,
+#     page_size: int = 20,
+#     api_key_id: str = Depends(validate_api_key)
+# ):
+#     """Get all firewall rules for the authenticated user's API key"""
+#     user_id = getattr(request.state, "api_key_id", api_key_id)
+    
+#     # Get rules for this user and API key
+#     rules = user_rules_manager.get_user_rules(user_id, api_key_id)
+    
+#     # Paginate
+#     total = len(rules)
+#     start = (page - 1) * page_size
+#     end = start + page_size
+#     paginated_rules = rules[start:end]
+    
+#     rule_responses = [FirewallRuleResponse(**rule.to_dict()) for rule in paginated_rules]
+    
+#     return FirewallRulesResponse(
+#         rules=rule_responses,
+#         total=total,
+#         page=page,
+#         page_size=page_size
+#     )
+
+# @app.get("/v1/firewall/rules/{rule_id}", response_model=FirewallRuleResponse)
+# async def get_firewall_rule(
+#     rule_id: str,
+#     request: Request,
+#     api_key_id: str = Depends(validate_api_key)
+# ):
+#     """Get a specific firewall rule by ID"""
+#     user_id = getattr(request.state, "api_key_id", api_key_id)
+    
+#     rule = user_rules_manager.get_rule(rule_id)
+#     if not rule:
+#         raise HTTPException(status_code=404, detail="Rule not found")
+    
+#     # Check if rule belongs to this user
+#     if rule.user_id != user_id or rule.api_key_id != api_key_id:
+#         raise HTTPException(status_code=403, detail="Access denied")
+    
+#     return FirewallRuleResponse(**rule.to_dict())
+
+# @app.put("/v1/firewall/rules/{rule_id}", response_model=FirewallRuleResponse)
+# async def update_firewall_rule(
+#     rule_id: str,
+#     request: Request,
+#     body: UpdateFirewallRuleRequest,
+#     api_key_id: str = Depends(validate_api_key)
+# ):
+#     """Update an existing firewall rule"""
+#     user_id = getattr(request.state, "api_key_id", api_key_id)
+    
+#     # Get existing rule
+#     existing_rule = user_rules_manager.get_rule(rule_id)
+#     if not existing_rule:
+#         raise HTTPException(status_code=404, detail="Rule not found")
+    
+#     # Check ownership
+#     if existing_rule.user_id != user_id or existing_rule.api_key_id != api_key_id:
+#         raise HTTPException(status_code=403, detail="Access denied")
+    
+#     # Prepare updates
+#     updates = {}
+#     if body.name is not None:
+#         updates["name"] = body.name
+#     if body.description is not None:
+#         updates["description"] = body.description
+#     if body.action is not None:
+#         try:
+#             updates["action"] = RuleAction(body.action)
+#         except ValueError:
+#             raise HTTPException(status_code=400, detail=f"Invalid action: {body.action}")
+#     if body.status is not None:
+#         try:
+#             updates["status"] = RuleStatus(body.status)
+#         except ValueError:
+#             raise HTTPException(status_code=400, detail=f"Invalid status: {body.status}")
+#     if body.conditions is not None:
+#         # Validate conditions if they're being updated
+#         validation_errors = user_rules_manager.validate_rule_conditions(existing_rule.rule_type, body.conditions)
+#         if validation_errors:
+#             raise HTTPException(status_code=400, detail={"errors": validation_errors})
+#         updates["conditions"] = body.conditions
+#     if body.priority is not None:
+#         updates["priority"] = body.priority
+#     if body.expires_at is not None:
+#         try:
+#             updates["expires_at"] = datetime.fromisoformat(body.expires_at.replace('Z', '+00:00'))
+#         except ValueError:
+#             raise HTTPException(status_code=400, detail="Invalid expires_at format. Use ISO datetime format.")
+    
+#     # Update the rule
+#     updated_rule = user_rules_manager.update_rule(rule_id, updates)
+#     if not updated_rule:
+#         raise HTTPException(status_code=500, detail="Failed to update rule")
+    
+#     return FirewallRuleResponse(**updated_rule.to_dict())
+
+# @app.delete("/v1/firewall/rules/{rule_id}")
+# async def delete_firewall_rule(
+#     rule_id: str,
+#     request: Request,
+#     api_key_id: str = Depends(validate_api_key)
+# ):
+#     """Delete a firewall rule"""
+#     user_id = getattr(request.state, "api_key_id", api_key_id)
+    
+#     # Get existing rule
+#     existing_rule = user_rules_manager.get_rule(rule_id)
+#     if not existing_rule:
+#         raise HTTPException(status_code=404, detail="Rule not found")
+    
+#     # Check ownership
+#     if existing_rule.user_id != user_id or existing_rule.api_key_id != api_key_id:
+#         raise HTTPException(status_code=403, detail="Access denied")
+    
+#     # Delete the rule
+#     success = user_rules_manager.delete_rule(rule_id)
+#     if not success:
+#         raise HTTPException(status_code=500, detail="Failed to delete rule")
+    
+#     return {"message": "Rule deleted successfully"}
+
+# @app.get("/v1/firewall/rules/stats")
+# async def get_firewall_rules_stats(
+#     request: Request,
+#     api_key_id: str = Depends(validate_api_key)
+# ):
+#     """Get statistics for the authenticated user's firewall rules"""
+#     try:
+#         user_id = getattr(request.state, "api_key_id", api_key_id)
+#         print(f"[DEBUG] Getting stats for user_id: {user_id}, api_key_id: {api_key_id}")
+        
+#         # Get user's rules
+#         user_rules = user_rules_manager.get_user_rules(user_id, api_key_id)
+#         print(f"[DEBUG] Found {len(user_rules)} rules for user")
+        
+#         # Calculate statistics
+#         total_rules = len(user_rules)
+#         active_rules = len([r for r in user_rules if r.status == RuleStatus.ACTIVE])
+#         inactive_rules = len([r for r in user_rules if r.status == RuleStatus.INACTIVE])
+#         expired_rules = len([r for r in user_rules if r.status == RuleStatus.EXPIRED])
+        
+#         print(f"[DEBUG] Stats - Total: {total_rules}, Active: {active_rules}, Inactive: {inactive_rules}, Expired: {expired_rules}")
+        
+#         # Count by rule type
+#         rule_type_counts = {}
+#         for rule in user_rules:
+#             rule_type = rule.rule_type.value
+#             rule_type_counts[rule_type] = rule_type_counts.get(rule_type, 0) + 1
+        
+#         # Count by action
+#         action_counts = {}
+#         for rule in user_rules:
+#             action = rule.action.value
+#             action_counts[action] = action_counts.get(action, 0) + 1
+        
+#         result = {
+#             "total_rules": total_rules,
+#             "active_rules": active_rules,
+#             "inactive_rules": inactive_rules,
+#             "expired_rules": expired_rules,
+#             "rule_type_distribution": rule_type_counts,
+#             "action_distribution": action_counts
+#         }
+        
+#         print(f"[DEBUG] Returning stats result: {result}")
+#         return result
+        
+#     except Exception as e:
+#         print(f"[ERROR] Exception in get_firewall_rules_stats: {str(e)}")
+#         import traceback
+#         print(f"[ERROR] Traceback: {traceback.format_exc()}")
+#         raise HTTPException(status_code=500, detail=f"Failed to fetch rule stats: {str(e)}")
 
 # -------- Token Management Endpoints --------
 
