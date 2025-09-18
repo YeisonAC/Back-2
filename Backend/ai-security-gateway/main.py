@@ -36,6 +36,12 @@ try:
 except ImportError:
     from credits_manager import consume_credits, check_credits_before_request, get_user_credits
 
+# Importar manager de reglas de Supabase
+try:
+    from .firewall.supabase_rules_manager import supabase_rules_manager
+except ImportError:
+    from firewall.supabase_rules_manager import supabase_rules_manager
+
 # Importar servicio de geolocalización simplificado
 try:
     from .geolocation_simple import simple_geolocation_service as geolocation_service
@@ -2126,6 +2132,29 @@ async def mgmt_delete_key(request: Request, key_id: str):
 
 # -------- User Firewall Rules Management --------
 
+# Helper function to extract value from conditions
+def extract_value_from_conditions(rule_type: str, conditions: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract a simplified value representation from rule conditions"""
+    if rule_type == "ip_whitelist" or rule_type == "ip_blacklist":
+        return {"ips": conditions.get("ips", [])}
+    elif rule_type == "country_block":
+        return {"countries": conditions.get("countries", [])}
+    elif rule_type == "rate_limit":
+        return {"requests_per_minute": conditions.get("requests_per_minute", 0)}
+    elif rule_type == "pattern_block":
+        return {"patterns": conditions.get("patterns", [])}
+    elif rule_type == "time_block":
+        return {
+            "start_time": conditions.get("start_time", ""),
+            "end_time": conditions.get("end_time", "")
+        }
+    elif rule_type == "user_agent_block":
+        return {"user_agents": conditions.get("user_agents", [])}
+    elif rule_type == "custom_ai_rule":
+        return {"prompt_patterns": conditions.get("prompt_patterns", [])}
+    else:
+        return conditions
+
 # Agregar estas funciones a tus endpoints existentes
 
 @app.post("/v1/firewall/rules", response_model=FirewallRuleResponse)
@@ -2138,57 +2167,48 @@ async def create_firewall_rule(
     user_id = getattr(request.state, "api_key_id", api_key_id)
     
     # Validate rule type
-    try:
-        rule_type = RuleType(body.rule_type)
-    except ValueError:
+    valid_rule_types = ["ip_whitelist", "ip_blacklist", "country_block", "rate_limit", 
+                       "pattern_block", "time_block", "user_agent_block", "custom_ai_rule"]
+    if body.rule_type not in valid_rule_types:
         raise HTTPException(status_code=400, detail=f"Invalid rule type: {body.rule_type}")
     
     # Validate action
-    try:
-        action = RuleAction(body.action)
-    except ValueError:
+    valid_actions = ["allow", "block", "log_only"]
+    if body.action not in valid_actions:
         raise HTTPException(status_code=400, detail=f"Invalid action: {body.action}")
-    
-    # Validate conditions
-    validation_errors = user_rules_manager.validate_rule_conditions(rule_type, body.conditions)
-    if validation_errors:
-        raise HTTPException(status_code=400, detail={"errors": validation_errors})
     
     # Parse expiration date
     expires_at = None
     if body.expires_at:
         try:
-            expires_at = datetime.fromisoformat(body.expires_at.replace('Z', '+00:00'))
+            expires_at = datetime.fromisoformat(body.expires_at.replace('Z', '+00:00')).isoformat()
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid expires_at format. Use ISO datetime format.")
     
     # Extract value from conditions for the new field
-    extracted_value = extract_value_from_conditions(rule_type, body.conditions)
+    extracted_value = extract_value_from_conditions(body.rule_type, body.conditions)
     
-    # Create the rule
-    rule = UserFirewallRule(
-        id="",  # Will be generated
-        user_id=user_id,
-        api_key_id=api_key_id,
-        name=body.name,
-        description=body.description,
-        rule_type=rule_type,
-        action=action,
-        status=RuleStatus.ACTIVE,
-        conditions=body.conditions,
-        value=extracted_value,  # Nuevo campo
-        priority=body.priority or 0,
-        expires_at=expires_at
-    )
+    # Prepare rule data for Supabase
+    rule_data = {
+        "user_id": user_id,
+        "api_key_id": api_key_id,
+        "name": body.name,
+        "description": body.description,
+        "rule_type": body.rule_type,
+        "action": body.action,
+        "status": "active",
+        "conditions": body.conditions,
+        "value": extracted_value,
+        "priority": body.priority or 0,
+        "expires_at": expires_at
+    }
     
-    # Save the rule
-    rule_id = user_rules_manager.create_rule(rule)
-    created_rule = user_rules_manager.get_rule(rule_id)
-    
-    if not created_rule:
-        raise HTTPException(status_code=500, detail="Failed to create rule")
-    
-    return FirewallRuleResponse(**created_rule.to_dict())
+    try:
+        # Create the rule in Supabase
+        created_rule = supabase_rules_manager.create_rule(rule_data)
+        return FirewallRuleResponse(**created_rule.to_dict())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create firewall rule: {str(e)}")
 
 @app.put("/v1/firewall/rules/{rule_id}", response_model=FirewallRuleResponse)
 async def update_firewall_rule(
@@ -2201,7 +2221,7 @@ async def update_firewall_rule(
     user_id = getattr(request.state, "api_key_id", api_key_id)
     
     # Get existing rule
-    existing_rule = user_rules_manager.get_rule(rule_id)
+    existing_rule = supabase_rules_manager.get_rule(rule_id)
     if not existing_rule:
         raise HTTPException(status_code=404, detail="Rule not found")
     
@@ -2216,20 +2236,16 @@ async def update_firewall_rule(
     if body.description is not None:
         updates["description"] = body.description
     if body.action is not None:
-        try:
-            updates["action"] = RuleAction(body.action)
-        except ValueError:
+        valid_actions = ["allow", "block", "log_only"]
+        if body.action not in valid_actions:
             raise HTTPException(status_code=400, detail=f"Invalid action: {body.action}")
+        updates["action"] = body.action
     if body.status is not None:
-        try:
-            updates["status"] = RuleStatus(body.status)
-        except ValueError:
+        valid_statuses = ["active", "inactive", "pending", "expired"]
+        if body.status not in valid_statuses:
             raise HTTPException(status_code=400, detail=f"Invalid status: {body.status}")
+        updates["status"] = body.status
     if body.conditions is not None:
-        # Validate conditions if they're being updated
-        validation_errors = user_rules_manager.validate_rule_conditions(existing_rule.rule_type, body.conditions)
-        if validation_errors:
-            raise HTTPException(status_code=400, detail={"errors": validation_errors})
         updates["conditions"] = body.conditions
         
         # Update the value field when conditions change
@@ -2240,16 +2256,233 @@ async def update_firewall_rule(
         updates["priority"] = body.priority
     if body.expires_at is not None:
         try:
-            updates["expires_at"] = datetime.fromisoformat(body.expires_at.replace('Z', '+00:00'))
+            updates["expires_at"] = datetime.fromisoformat(body.expires_at.replace('Z', '+00:00')).isoformat()
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid expires_at format. Use ISO datetime format.")
     
-    # Update the rule
-    updated_rule = user_rules_manager.update_rule(rule_id, updates)
-    if not updated_rule:
-        raise HTTPException(status_code=500, detail="Failed to update rule")
+    try:
+        # Update the rule in Supabase
+        updated_rule = supabase_rules_manager.update_rule(rule_id, updates)
+        if not updated_rule:
+            raise HTTPException(status_code=500, detail="Failed to update rule")
+        
+        return FirewallRuleResponse(**updated_rule.to_dict())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update firewall rule: {str(e)}")
+
+@app.get("/v1/firewall/rules", response_model=FirewallRulesResponse)
+async def get_firewall_rules(
+    request: Request,
+    page: int = 1,
+    page_size: int = 20,
+    rule_type: Optional[str] = None,
+    status: Optional[str] = None,
+    api_key_id: str = Depends(validate_api_key)
+):
+    """Get all firewall rules for the authenticated user's API key with pagination"""
+    user_id = getattr(request.state, "api_key_id", api_key_id)
     
-    return FirewallRuleResponse(**updated_rule.to_dict())
+    try:
+        rules, total_count = supabase_rules_manager.get_rules(
+            user_id=user_id,
+            api_key_id=api_key_id,
+            page=page,
+            page_size=page_size,
+            rule_type=rule_type,
+            status=status
+        )
+        
+        rule_responses = [FirewallRuleResponse(**rule.to_dict()) for rule in rules]
+        
+        return FirewallRulesResponse(
+            rules=rule_responses,
+            total=total_count,
+            page=page,
+            page_size=page_size
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get firewall rules: {str(e)}")
+
+@app.get("/v1/firewall/rules/{rule_id}", response_model=FirewallRuleResponse)
+async def get_firewall_rule(
+    rule_id: str,
+    request: Request,
+    api_key_id: str = Depends(validate_api_key)
+):
+    """Get a specific firewall rule by ID"""
+    user_id = getattr(request.state, "api_key_id", api_key_id)
+    
+    try:
+        rule = supabase_rules_manager.get_rule(rule_id)
+        if not rule:
+            raise HTTPException(status_code=404, detail="Rule not found")
+        
+        # Check ownership
+        if rule.user_id != user_id or rule.api_key_id != api_key_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        return FirewallRuleResponse(**rule.to_dict())
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get firewall rule: {str(e)}")
+
+@app.delete("/v1/firewall/rules/{rule_id}")
+async def delete_firewall_rule(
+    rule_id: str,
+    request: Request,
+    api_key_id: str = Depends(validate_api_key)
+):
+    """Delete a firewall rule"""
+    user_id = getattr(request.state, "api_key_id", api_key_id)
+    
+    try:
+        # Get existing rule to check ownership
+        existing_rule = supabase_rules_manager.get_rule(rule_id)
+        if not existing_rule:
+            raise HTTPException(status_code=404, detail="Rule not found")
+        
+        # Check ownership
+        if existing_rule.user_id != user_id or existing_rule.api_key_id != api_key_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Delete the rule
+        success = supabase_rules_manager.delete_rule(rule_id)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to delete rule")
+        
+        return {"message": "Rule deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete firewall rule: {str(e)}")
+
+@app.get("/v1/firewall/rules/stats")
+async def get_firewall_rules_stats(
+    request: Request,
+    api_key_id: str = Depends(validate_api_key)
+):
+    """Get statistics for the authenticated user's firewall rules"""
+    user_id = getattr(request.state, "api_key_id", api_key_id)
+    
+    try:
+        stats = supabase_rules_manager.get_rule_statistics(user_id, api_key_id)
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get firewall rule statistics: {str(e)}")
+
+@app.get("/v1/firewall/rules/types", response_model=RuleTypesResponse)
+async def get_firewall_rule_types():
+    """Get available firewall rule types and their configuration options"""
+    rule_types_info = [
+        {
+            "type": "ip_whitelist",
+            "name": "IP Whitelist",
+            "description": "Allow requests only from specific IP addresses",
+            "conditions_schema": {
+                "ips": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of allowed IP addresses"
+                }
+            }
+        },
+        {
+            "type": "ip_blacklist",
+            "name": "IP Blacklist",
+            "description": "Block requests from specific IP addresses",
+            "conditions_schema": {
+                "ips": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of blocked IP addresses"
+                }
+            }
+        },
+        {
+            "type": "country_block",
+            "name": "Country Block",
+            "description": "Block requests from specific countries",
+            "conditions_schema": {
+                "countries": {
+                    "type": "array",
+                    "items": {"type": "string", "maxLength": 2},
+                    "description": "List of 2-letter country codes to block"
+                }
+            }
+        },
+        {
+            "type": "rate_limit",
+            "name": "Rate Limit",
+            "description": "Limit number of requests per time period",
+            "conditions_schema": {
+                "requests_per_minute": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum requests per minute"
+                }
+            }
+        },
+        {
+            "type": "pattern_block",
+            "name": "Pattern Block",
+            "description": "Block requests containing specific patterns",
+            "conditions_schema": {
+                "patterns": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of patterns to block in request content"
+                }
+            }
+        },
+        {
+            "type": "time_block",
+            "name": "Time Block",
+            "description": "Block requests during specific time ranges",
+            "conditions_schema": {
+                "start_time": {
+                    "type": "string",
+                    "pattern": "^([01]?[0-9]|2[0-3]):[0-5][0-9]$",
+                    "description": "Start time in HH:MM format"
+                },
+                "end_time": {
+                    "type": "string",
+                    "pattern": "^([01]?[0-9]|2[0-3]):[0-5][0-9]$",
+                    "description": "End time in HH:MM format"
+                }
+            }
+        },
+        {
+            "type": "user_agent_block",
+            "name": "User Agent Block",
+            "description": "Block requests from specific user agents",
+            "conditions_schema": {
+                "user_agents": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of user agent patterns to block"
+                }
+            }
+        },
+        {
+            "type": "custom_ai_rule",
+            "name": "Custom AI Rule",
+            "description": "Custom rules using AI pattern detection",
+            "conditions_schema": {
+                "prompt_patterns": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of prompt patterns to detect"
+                }
+            }
+        }
+    ]
+    
+    return RuleTypesResponse(
+        rule_types=rule_types_info,
+        actions=["allow", "block", "log_only"],
+        statuses=["active", "inactive", "pending", "expired"]
+    )
 
 # Endpoint adicional para buscar reglas por valor
 @app.get("/v1/firewall/rules/search")
@@ -2259,35 +2492,22 @@ async def search_firewall_rules(
     rule_type: Optional[str] = None,
     api_key_id: str = Depends(validate_api_key)
 ):
-    """Search firewall rules by value or conditions"""
+    """Search firewall rules by name or description"""
     user_id = getattr(request.state, "api_key_id", api_key_id)
     
     try:
-        # Base query
-        query = user_rules_manager.supabase.table("firewall_rules")\
-            .select("*")\
-            .eq("user_id", user_id)\
-            .eq("api_key_id", api_key_id)
+        rules = supabase_rules_manager.search_rules(
+            user_id=user_id,
+            query=q,
+            api_key_id=api_key_id,
+            rule_type=rule_type
+        )
         
-        # Add rule type filter if specified
-        if rule_type:
-            query = query.eq("rule_type", rule_type)
-        
-        # Search in value field (JSONB contains query)
-        # This will work for both single values and arrays
-        query = query.or_(f'value.cs."{q}",name.ilike.%{q}%,description.ilike.%{q}%')
-        
-        result = query.execute()
-        
-        rules = []
-        for rule_data in result.data:
-            rule = user_rules_manager._dict_to_rule(rule_data)
-            if rule:
-                rules.append(FirewallRuleResponse(**rule.to_dict()))
+        rule_responses = [FirewallRuleResponse(**rule.to_dict()) for rule in rules]
         
         return {
-            "rules": rules,
-            "total": len(rules),
+            "rules": rule_responses,
+            "total": len(rule_responses),
             "query": q,
             "rule_type": rule_type
         }
@@ -2306,30 +2526,24 @@ async def get_rules_by_type(
     """Get rules filtered by type"""
     user_id = getattr(request.state, "api_key_id", api_key_id)
     
-    try:
-        # Validate rule type
-        RuleType(rule_type)
-    except ValueError:
+    # Validate rule type
+    valid_rule_types = ["ip_whitelist", "ip_blacklist", "country_block", "rate_limit", 
+                       "pattern_block", "time_block", "user_agent_block", "custom_ai_rule"]
+    if rule_type not in valid_rule_types:
         raise HTTPException(status_code=400, detail=f"Invalid rule type: {rule_type}")
     
     try:
-        result = user_rules_manager.supabase.table("firewall_rules")\
-            .select("*")\
-            .eq("user_id", user_id)\
-            .eq("api_key_id", api_key_id)\
-            .eq("rule_type", rule_type)\
-            .order("priority", desc=True)\
-            .execute()
+        rules = supabase_rules_manager.get_rules_by_type(
+            user_id=user_id,
+            rule_type=rule_type,
+            api_key_id=api_key_id
+        )
         
-        rules = []
-        for rule_data in result.data:
-            rule = user_rules_manager._dict_to_rule(rule_data)
-            if rule:
-                rules.append(FirewallRuleResponse(**rule.to_dict()))
+        rule_responses = [FirewallRuleResponse(**rule.to_dict()) for rule in rules]
         
         return {
-            "rules": rules,
-            "total": len(rules),
+            "rules": rule_responses,
+            "total": len(rule_responses),
             "rule_type": rule_type
         }
         
@@ -2337,15 +2551,7 @@ async def get_rules_by_type(
         print(f"Error getting rules by type: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to fetch rules by type")
 
-# Inicialización (agrega esto a tu código principal)
-from supabase import create_client
-import os
-
-# Inicializar el manager con tus credenciales de Supabase
-user_rules_manager = UserRulesManager(
-    supabase_url=os.getenv("SUPABASE_URL"),
-    supabase_key=os.getenv("SUPABASE_ANON_KEY")
-)
+# Los endpoints de firewall rules ahora están completamente integrados con Supabase
 # @app.get("/v1/firewall/rules/types", response_model=RuleTypesResponse)
 # async def get_firewall_rule_types():
 #     """Get available firewall rule types and their configuration options"""
